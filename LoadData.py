@@ -1,7 +1,6 @@
-import os
-import pytz
-import datetime
+from pathlib import Path as FilePath
 import pandas as pd
+import warnings
 from datetime import datetime, timezone
 
 def selectfiletype(dataFilePath, opExt):
@@ -95,52 +94,64 @@ def modify_datetimes(df, DateTimes, StartTime, EndTime, Format):
 
 def loadData(Path, DateTimes, StartTime, EndTime, Format):
     """
-    Load data from a file at the specified path, ensuring the file exists, is non-empty,
-    and can be loaded into a pandas DataFrame. Additionally, specified datetime columns
-    are converted to datetime objects.
+        Load CSV or Excel data and apply the existing datetime processing.
 
-    Parameters:
-    - Path (str): The file path to load the data from.
-    - DateTimes (list): A list of column names in the DataFrame that should be converted to datetime.
-      The first 2 elements should contain column names of startdatetime and enddatetimes
-    - StartTime: Analysis start datetime in UTC
-    - EndTime: Analysis end datetime in UTC
-    - Format (str): The format of the datetime.
+        Parameters
+        ----------
+        Path : str, pathlib.Path, or None
+            Input file path. Missing or blank paths return an empty DataFrame.
+        DateTimes : list
+            Datetime column names. The first two identify the start and end.
+        StartTime, EndTime : datetime
+            Analysis time boundaries passed to modify_datetimes().
+        Format : str
+            Datetime format passed to modify_datetimes().
 
-    Returns:
-    - DataDF (pandas.DataFrame): A DataFrame containing the loaded data, or an empty DataFrame
-                                 if the file is not found, is empty, or contains invalid data.
+        Returns
+        -------
+        pandas.DataFrame
+            Loaded and filtered data, or an empty DataFrame when the path is
+            absent, the file does not exist, or the file contains no records.
+
+        Notes
+        -----
+        Unsupported formats, permission errors, malformed nonempty files,
+        and datetime conversion errors remain visible to the caller.
     """
+    # An omitted path means no data were supplied for this input.
+    if Path is None or not str(Path).strip():
+        return pd.DataFrame()
 
-    # Initialize an empty DataFrame
-    if Path is not None:
-        try:
-            # Check if the file exists at the given path
-            if not os.path.exists(Path):
-                print(f"File not found: {Path}")
-                DataDF = pd.DataFrame()  # Return an empty DataFrame if file is not found
-            else:
-                # Open and read the file to check for content
-                with open(Path, 'r') as file:
-                    content = file.read().strip()  # Remove leading/trailing whitespace and newlines
-                # If the file is empty, return an empty DataFrame
-                if not content:
-                    print("The file is empty.")
-                    DataDF = pd.DataFrame()
-                else:
-                    # File has content, attempt to load into a DataFrame
-                    DataDF = selectfiletype(Path, '.csv')  # Function to handle specific file types
-                    print("File successfully loaded into a DataFrame.")
-        # Handle cases where the file cannot be parsed into a DataFrame
-        except pd.errors.EmptyDataError:
-            print("The file is invalid or contains no parsable data.")
-            DataDF = pd.DataFrame()
-    else:
-        # If no path is provided, return an empty DataFrame
-        DataDF = pd.DataFrame()
+    file_path = FilePath(Path).expanduser()
 
-    # If the DataFrame is not empty, convert specified columns to datetime
-    if not DataDF.empty:
-        DataDF = modify_datetimes(df=DataDF, DateTimes=DateTimes, StartTime=StartTime, EndTime=EndTime, Format=Format)
+    if not file_path.is_file():
+        print(f"File not found: {file_path}. Returning an empty DataFrame.")
+        return pd.DataFrame()
 
+    try:
+        # Check file size without reading binary Excel files as text.
+        if file_path.stat().st_size == 0:
+            print(f"File is empty: {file_path}")
+            return pd.DataFrame()
+
+        # Use the actual extension; lowercase also accepts .CSV and .XLSX.
+        extension = file_path.suffix.lower()
+        DataDF = selectfiletype(file_path, extension)
+
+    except FileNotFoundError:
+        # Handle a file removed between the existence check and reading.
+        print(f"File no longer exists: {file_path}")
+        return pd.DataFrame()
+
+    except pd.errors.EmptyDataError:
+        # Includes CSV files containing only whitespace or no usable columns.
+        print(f"File contains no readable data: {file_path}")
+        return pd.DataFrame()
+
+    # Preserve column headers when a file has headers but no records.
+    if DataDF.empty:
+        return DataDF
+
+    DataDF = modify_datetimes(df=DataDF, DateTimes=DateTimes, StartTime=StartTime, EndTime=EndTime, Format=Format)
+    print(f"Loaded {len(DataDF)} records within the analysis window.")
     return DataDF

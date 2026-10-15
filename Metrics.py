@@ -1,17 +1,17 @@
-import warnings
-import pandas as pd
 import numpy as np
+import pandas as pd
 from Classification import merge_intervals
-from datetime import datetime, timezone
 
 def factorsFromrelativeErrors(RE):
     """
-    Converts a relative error (RE) into a multiplicative factor.
-    Parameters:
-        - RE (float): The relative error value.
-    Returns:
-        - float: The corresponding multiplicative factor.
+        Converts a relative error (RE) into a multiplicative factor.
+        Parameters:
+            - RE (float): The relative error value.
+        Returns:
+            - float: The corresponding multiplicative factor.
     """
+    if pd.isna(RE):
+        return np.nan
     try:
         if RE > 0:
             # Positive relative error adds directly to 1
@@ -33,29 +33,26 @@ def factorsFromrelativeErrors(RE):
 
 def totalEstimate_per_timestep(df, emissionrate, factor=1/3600, totalEmission="total_emission"):
     """
-    Calculates the total emission per time step based on the specified frequency.
+        Calculates the total emission per time step based on the specified frequency.
 
-    Parameters:
-        - df (pd.DataFrame): Input DataFrame with a datetime index.
-        - emissionrate (str): Column name for the emission rate values.
-        - factor (float): Conversion factor to transform rate in seconds time-basis, default is 1/3600.
-        - totalEmission (str): Column name for the calculated total emissions.
+        Parameters:
+            - df (pd.DataFrame): Input DataFrame with a datetime index.
+            - emissionrate (str): Column name for the emission rate values.
+            - factor (float): Conversion factor to transform rate in seconds time-basis, default is 1/3600.
+            - totalEmission (str): Column name for the calculated total emissions.
 
-    Returns:
-        - pd.DataFrame: DataFrame with added columns for time differences and total emissions.
+        Returns:
+            - pd.DataFrame: DataFrame with added columns for time differences and total emissions.
     """
 
     # Ensure the DataFrame is sorted by its index
     df = df.sort_index()
-
     # Calculate time differences based on specified frequency units in terms seconds
     df['time_diffs'] = df.index.to_series().diff().dt.total_seconds().fillna(0)
-
     # Modify 'time_diffs' where the emission rate is > 0 and 'Cumulative Duration' is 0
     if 'Cumulative Duration' in df.columns:
         mask = (df[emissionrate] > 0) & (df['Cumulative Duration'] == float(0))
         df.loc[mask, 'time_diffs'] = 0
-
     # Calculate total emission for each time step
     df[totalEmission] = df.apply(lambda row: row[emissionrate] * row['time_diffs'] * factor, axis=1)
 
@@ -64,21 +61,21 @@ def totalEstimate_per_timestep(df, emissionrate, factor=1/3600, totalEmission="t
 def AnalysisCrossCheck(Original_CRDF, Original_DRDF, Analyzed_CRDF, Analyzed_DRDF, QuantData,
                        cr_releaseRate, dr_releaseRate, cr_DateTime, dr_DateTime, timefactor):
     """
-    Cross-checks total emissions (mass) between original and analyzed datasets.
+        Cross-checks total emissions (mass) between original and analyzed datasets.
 
-    Parameters
-        - Original_CRDF : Original Controlled Release dataset with start and end datetime columns.
-        - Original_DRDF : Original Detection Report dataset with start and end datetime columns.
-        - Analyzed_CRDF : Analyzed Controlled Release dataset (index should be a DatetimeIndex).
-        - Analyzed_DRDF : Analyzed Detection Report dataset (index should be a DatetimeIndex).
-        - QuantData: Paired data for comparing quantification estimates with release rates
-        - cr_releaseRate : Column name of release rate in CRDF datasets.
-        - dr_releaseRate : Column name of release rate in DRDF datasets.
-        - cr_DateTime : List containing start and end datetime column names for CRDF.
-        - dr_DateTime : List containing start and end datetime column names for DRDF.
-        - timefactor : Conversion factor (e.g., scaling to correct units).
+        Parameters
+            - Original_CRDF : Original Controlled Release dataset with start and end datetime columns.
+            - Original_DRDF : Original Detection Report dataset with start and end datetime columns.
+            - Analyzed_CRDF : Analyzed Controlled Release dataset (index should be a DatetimeIndex).
+            - Analyzed_DRDF : Analyzed Detection Report dataset (index should be a DatetimeIndex).
+            - QuantData: Paired data for comparing quantification estimates with release rates
+            - cr_releaseRate : Column name of release rate in CRDF datasets.
+            - dr_releaseRate : Column name of release rate in DRDF datasets.
+            - cr_DateTime : List containing start and end datetime column names for CRDF.
+            - dr_DateTime : List containing start and end datetime column names for DRDF.
+            - timefactor : Conversion factor (e.g., scaling to correct units).
 
-    Returns None
+        Returns None
     """
 
     try:
@@ -127,78 +124,106 @@ def AnalysisCrossCheck(Original_CRDF, Original_DRDF, Analyzed_CRDF, Analyzed_DRD
 
     return
 
-def evaluateRelativeErrors(quantDF, cr_emission, dr_emission):
+def evaluateRelativeErrors(quantDF, minTrueRate, cr_emission, dr_emission):
     """
-    Evaluates relative errors between classified emissions and detection report emissions.
-    Also computes multiplicative factors for these relative errors.
+        Filter paired rates and calculate relative errors and factors.
 
-    Parameters:
-        - quantDF (pd.DataFrame): The DataFrame of paired quantification data.
-        - cr_emission (str): Column name for "classified report" emissions.
-        - dr_emission (str): Column name for "detection report" emissions.
+        Remove rows where each rate is either zero or missing, including
+        mixed zero/missing pairs. For remaining rows, calculate results
+        only when both rates are finite and nonzero, regardless of classification.
+        The input DataFrame is not modified.
 
-    Returns:
-        - pd.DataFrame: The updated DataFrame with relative errors and multiplicative factors.
+        Parameters
+        ----------
+        quantDF : pandas.DataFrame
+            Paired data containing the columns named by cr_emission and
+            dr_emission. Classification is not required or used.
+
+        minTrueRate : float or None
+            Optional CR-rate threshold in the same units as cr_emission.
+            Retain only rows with CR rates strictly above this threshold.
+            None or NaN disables this additional filter.
+
+        cr_emission : str
+            Controlled-release reference-rate column name.
+            Numeric values provide the relative-error denominator.
+
+        dr_emission : str
+            Detection-report rate column name, using the same units as CR.
+
+        Returns
+        -------
+        pandas.DataFrame
+            A copied, filtered DataFrame with:
+            - QuantificationAccuracyRel: (DR_rate - CR_rate) / CR_rate.
+            - QuantificationFactors: output of factorsFromrelativeErrors().
+
+            Retained rows with a missing, infinite, or zero rate receive
+            None in both output columns. Previous results are replaced.
+
+        Notes
+        -----
+        Unparseable rates are treated as missing.
+        Finite negative rates are eligible for calculations.
+        Requires factorsFromrelativeErrors() to be defined or imported.
     """
+    quantDF = quantDF.copy()
 
-    def relative_error(row):
-        """
-        Computes the relative error for a single row.
+    # Convert rates to numeric; unparseable values become missing.
+    cr = pd.to_numeric(quantDF[cr_emission], errors="coerce")
+    dr = pd.to_numeric(quantDF[dr_emission], errors="coerce")
 
-        Parameters:
-            - row (pd.Series): A single row of the DataFrame.
-        Returns:
-            - float or None: The relative error, or None if values are invalid.
-        """
-        # Explicitly convert to scalar values
-        try:
-            dr_emissions = float(row[dr_emission])
-            cr_emissions = float(row[cr_emission])
-            classification = str(row['Classification'])
-        except (ValueError, TypeError):
-            return None
+    # Remove (0, 0), (missing, missing), (0, missing), and (missing, 0).
+    remove = ((cr.eq(0) | cr.isna()) & (dr.eq(0) | dr.isna())).fillna(False)
+    quantDF = quantDF.loc[~remove].copy()
 
-        # Return None if either value is null, NaN, missing, or not TP
-        #if pd.isna(dr_emissions) or pd.isna(cr_emissions) or classification in ["FP", "FN", "TN"]:
-        if pd.isna(dr_emissions) or pd.isna(cr_emissions) or classification in ["Maintenance Record: Data Excluded",
-                                                                                "Offline Record: Data Excluded", "0"]:
-            return None
+    # Recalculate CR values to align with the retained rows.
+    cr = pd.to_numeric(quantDF[cr_emission], errors="coerce")
 
-        try:
-            if cr_emissions == 0:
-                return None
-            return (dr_emissions - cr_emissions) / cr_emissions
-        except Exception as e:
-            print(f"Unexpected error for row {row.name}: {e}")
-            return None
+    # Apply the optional minimum CR-rate filter.
+    if not pd.isna(minTrueRate):
+        quantDF = quantDF.loc[cr > minTrueRate].copy()
 
-    # Compute relative errors for each row
-    quantDF["QuantificationAccuracyRel"] = quantDF.apply(relative_error, axis=1)
+    # Align both numeric rate Series with the final retained rows.
+    cr = pd.to_numeric(quantDF[cr_emission], errors="coerce")
+    dr = pd.to_numeric(quantDF[dr_emission], errors="coerce")
 
-    # Compute multiplicative factors for "1" classification
-    mask_tp = quantDF["Classification"] == "1"
-    quantDF.loc[mask_tp, "QuantificationFactors"] = quantDF.loc[mask_tp, "QuantificationAccuracyRel"].apply(
-        factorsFromrelativeErrors)
+    # Calculate results only when both rates are finite and nonzero.
+    valid = (np.isfinite(cr) & np.isfinite(dr) & cr.ne(0) & dr.ne(0)).fillna(False)
+
+    # Object dtype preserves literal None for ineligible retained rows.
+    errors = pd.Series(None, index=quantDF.index, dtype=object)
+    factors = pd.Series(None, index=quantDF.index, dtype=object)
+
+    # Compute relative errors for eligible rows.
+    errors.loc[valid] = ((dr.loc[valid] - cr.loc[valid]) / cr.loc[valid])
+
+    # Compute factors using your existing helper.
+    factors.loc[valid] = errors.loc[valid].apply(factorsFromrelativeErrors)
+
+    # Replace both result columns, clearing any stale values.
+    quantDF["QuantificationAccuracyRel"] = errors
+    quantDF["QuantificationFactors"] = factors
 
     return quantDF
 
 def identify_consecutive_runs(df, classification, RecievedTime=None):
     """
-    Identifies consecutive runs of values in the specified column of a DataFrame
-    and returns a new DataFrame with startTime, endTime, Classification, DetectTime, and ID.
+        Identifies consecutive runs of values in the specified column of a DataFrame
+        and returns a new DataFrame with startTime, endTime, Classification, DetectTime, and ID.
 
-    Parameters:
-        - df (pd.DataFrame): Input DataFrame with datetime index and a column of binary or categorical values.
-        - classification (1 or 0): The name of the column containing the values to identify runs (1s and 0s).
-        - ReceivedTime: The datetime (UTC) at which an observation report was received by the Test Center
+        Parameters:
+            - df (pd.DataFrame): Input DataFrame with datetime index and a column of binary or categorical values.
+            - classification (1 or 0): The name of the column containing the values to identify runs (1s and 0s).
+            - ReceivedTime: The datetime (UTC) at which an observation report was received by the Test Center
 
-    Returns:
-    - pd.DataFrame: A DataFrame with columns:
-        - "startTime": The start time of the run.
-        - "endTime": The end time of the run.
-        - "Classification": The value of the run (from the column_name).
-        - "ReceivedTime": The minimum value of the ReceivedTime
-        - "ID": A unique incremental integer for each run.
+        Returns:
+        - pd.DataFrame: A DataFrame with columns:
+            - "startTime": The start time of the run.
+            - "endTime": The end time of the run.
+            - "Classification": The value of the run (from the column_name).
+            - "ReceivedTime": The minimum value of the ReceivedTime
+            - "ID": A unique incremental integer for each run.
     """
     # Ensure the DataFrame is sorted by datetime index
     df = df.sort_index()
@@ -206,10 +231,8 @@ def identify_consecutive_runs(df, classification, RecievedTime=None):
     # Ensure the index is a datetime index
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("DataFrame index must be a DatetimeIndex.")
-
     # Add a group identifier for consecutive runs
     df['shift'] = df[classification].ne(df[classification].shift()).cumsum()
-
     # Reset the index to access it as a column for aggregation
     df.index.name = 'Time' # Ensures the new column created is called "Time"
     df = df.reset_index()
@@ -235,119 +258,62 @@ def identify_consecutive_runs(df, classification, RecievedTime=None):
 
 def timeDifference(DRDF, CRDF, RecievedTime, tc_Detection="tc_Detection", dr_Detection="dr_Detection", timebasis=60):
     """
-        Optimized calculation of time to detection (TTD) and time to alert (TTA) between CRDF and DRDF detections.
+        Return (TTA, TTD) arrays, one minimum per matched controlled-release run.
 
-        Parameters:
-            - DRDF (pd.DataFrame): DataFrame for DR detections with datetime index.
-            - CRDF (pd.DataFrame): DataFrame for CR detections with datetime index.
-            - RecievedTime (str): Column name for the ReceivedTime
-            - tc_Detection (str): Column name for the result of thresholding result to CRDF.
-            - dr_Detection (str): Column name for the result of thresholding result to DRDF.
-            - timebasis (int): Time basis for normalization (default: 60 seconds).
+        Detection timestamps are sample-end timestamps, matching the classification
+        grid. An alert requires a valid receipt time; detection time does not. UTC
+        conversion preserves instants. Process each CR run independently to avoid a
+        potentially huge CR-by-DR matrix. The historical RecievedTime spelling is
+        retained for compatibility.
+    """
+    if timebasis <= 0:
+        raise ValueError('timebasis must be positive.')
+    cr = CRDF.copy()
+    dr = DRDF.copy()
+    cr.index = pd.to_datetime(cr.index, utc=True)
+    dr.index = pd.to_datetime(dr.index, utc=True)
 
-        Returns:
-            - np.ndarray: Array of time-to-detection values (TTD).
-            - np.ndarray: Array of time-to-alert values (TTA).
-        """
-    # Create a deep copy of the DataFrame
-    CRDF_copy = CRDF.copy(deep=True)
-    DRDF_copy = DRDF.copy(deep=True)
-
-    # Filter out the Null column in DetectTime, RecievedTime.
-    if RecievedTime is not None:
-        DRDF_copy = DRDF_copy.loc[DRDF_copy[RecievedTime] != ""]
-        # Ensure all are in datetime type.
-        DRDF_copy[RecievedTime] = pd.to_datetime(DRDF_copy[RecievedTime], errors='coerce')
-        DRDF_copy[RecievedTime] = DRDF_copy[RecievedTime].apply(lambda dt: dt.replace(tzinfo=timezone.utc))
-
-
-    # Identify consecutive runs of detections
-    crDF = identify_consecutive_runs(df=CRDF_copy, classification=tc_Detection)
-    drDF = identify_consecutive_runs(df=DRDF_copy, classification=dr_Detection, RecievedTime=RecievedTime)
-
-    # Filter out rows where detection is 1
-    CRDF_detect = crDF.loc[crDF["Classification"] > 0].reset_index(drop=True)
-    DRDF_detect = drDF.loc[drDF["Classification"] > 0].reset_index(drop=True)
-
-    # Extract start and end times for CRDF detections
-    cr_start_times = CRDF_detect["startTime"].values[:, None]  # Shape (n, 1)
-    cr_end_times = CRDF_detect["endTime"].values[:, None]  # Shape (n, 1)
-
-    # Extract start times for DRDF detections
-    dr_start_times = DRDF_detect["startTime"].values  # Shape (m,)
-
-    # Extract the received time of the detection report associated with the detection for DRDF detections
-    try:
-        ReceivedTime = DRDF_detect["RecievedTime"].values  # Shape (m,)
-    except Exception as e:
-        print(f"Could not run the evaluation due to {e}")
-
-    # Create a mask for overlapping time ranges for each time in dr_start_times
-    overlap_mask = (dr_start_times >= cr_start_times) & (dr_start_times <= cr_end_times)
-
-    # Evaluate TTA - Time to Alert
-    try:
-        time_differences_TTA = np.where(overlap_mask, (ReceivedTime - cr_start_times).astype("timedelta64[s]").astype(float)/timebasis, np.nan)
-    except Exception as e:
-        print(f"Could not run the evaluation due to {e}")
-
-    # Evaluate TTD - Time to Detect
-    time_differences_TTD = np.where(overlap_mask, (dr_start_times - cr_start_times).astype("timedelta64[s]").astype(float)/timebasis, np.nan)
-
-    try:
-        # Check if all columns are NaN before evaluating TTA
-        if np.all(np.isnan(time_differences_TTA), axis=1).all():
-            # Return an empty array if all columns are NaN
-            TTA = np.array([])
-        else:
-            # Otherwise, calculate the minimum ignoring NaNs
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                TTA = np.nanmin(time_differences_TTA, axis=1)
-                TTA = TTA[~np.isnan(TTA)]
-    except Exception as e:
-        print(f"Could not run the evaluation due to {e}")
-        TTA = np.array([])
-
-    # Check if all columns are NaN before evaluating TTD
-    if np.all(np.isnan(time_differences_TTD), axis=1).all():
-        # Return an empty array if all columns are NaN
-        TTD = np.array([])
-    else:
-        # Otherwise, calculate the minimum ignoring NaNs
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            TTD = np.nanmin(time_differences_TTD, axis=1)
-            TTD = TTD[~np.isnan(TTD)]
-
-    # Add TTA and TTD columns to the detection-level DRDF_detect DataFrame
-    # This section was added to display the columns of TTA and TTD in the classifiedData file
-    DRDF_detect = DRDF_detect.copy()
-    DRDF_detect["TTA"] = pd.Series(TTA, index=DRDF_detect.index[:len(TTA)])
-    DRDF_detect["TTD"] = pd.Series(TTD, index=DRDF_detect.index[:len(TTD)])
-
-    #return DRDF_detect
-    return TTA, TTD
+    # Exclusions must break detection runs; otherwise maintenance/offline data
+    # can contribute alerts even though classification deliberately excludes it.
+    for frame, flag, detection in ((cr, 'tc_Classification', tc_Detection), (dr, 'dr_Classification', dr_Detection)):
+        if flag in frame:
+            excluded = frame[flag].astype(str).str.contains('Data Excluded', regex=False)
+            frame[detection] = frame[detection].astype(float).mask(excluded)
+    has_receipt = RecievedTime is not None and RecievedTime in dr
+    if has_receipt:
+        dr[RecievedTime] = pd.to_datetime(dr[RecievedTime], utc=True, errors='coerce')
+    cr_runs = identify_consecutive_runs(cr, tc_Detection)
+    dr_runs = identify_consecutive_runs(dr, dr_Detection, RecievedTime if has_receipt else None)
+    cr_runs = cr_runs.loc[cr_runs['Classification'] > 0]
+    dr_runs = dr_runs.loc[dr_runs['Classification'] > 0]
+    TTA, TTD = [], []
+    for run in cr_runs.itertuples(index=False):
+        matches = dr_runs.loc[dr_runs['startTime'].between(run.startTime, run.endTime)]
+        if matches.empty:
+            continue
+        TTD.append((matches['startTime'].min() - run.startTime).total_seconds() / timebasis)
+        if has_receipt:
+            receipt = matches['RecievedTime'].min()
+            if pd.notna(receipt):
+                TTA.append((receipt - run.startTime).total_seconds() / timebasis)
+    return np.asarray(TTA), np.asarray(TTD)
 
 def concatenate_with_common_index(df1, df2):
     """
-    Concatenates two DataFrames using their common indexes.
-    The resulting DataFrame adopts the index of one of the input DataFrames.
+        Concatenates two DataFrames using their common indexes.
+        The resulting DataFrame adopts the index of one of the input DataFrames.
 
-    Parameters:
-        - df1 (DataFrame): First DataFrame.
-        - df2 (DataFrame): Second DataFrame.
-
-    Returns:
-        - pd.DataFrame: A new DataFrame concatenated using the common index.
+        Parameters:
+            - df1 (DataFrame): First DataFrame.
+            - df2 (DataFrame): Second DataFrame.
+        Returns:
+            - pd.DataFrame: A new DataFrame concatenated using the common index.
     """
     # Determine the common indexes
     common_index = df1.index.intersection(df2.index)
-
     # Filter both DataFrames to only include rows with the common index
     df1_filtered = df1.loc[common_index]
     df2_filtered = df2.loc[common_index]
-
     # Concatenate along the columns and use the index of the specified DataFrame
     result = pd.concat([df1_filtered, df2_filtered], axis=1)
 
@@ -356,61 +322,44 @@ def concatenate_with_common_index(df1, df2):
 
 def calculate_excludedTimes(exclusionDF, col_start, col_end, start, end):
     """
-    Calculates the total excluded time within a given time range by merging overlapping intervals.
+        Return excluded seconds within [start, end], merging overlaps once.
 
-    Parameters:
-        - exclusionDF (DataFrame): DataFrame containing exclusion periods with start and end times.
-        - col_start (str): Column name in `exclusionDF` representing the start of each interval.
-        - col_end (str): Column name in `exclusionDF` representing the end of each interval.
-        - start (datetime): Start time for the calculation period.
-        - end (datetime): End time for the calculation period.
-
-    Returns:
-        - float: Total excluded time in seconds.
+        Partially overlapping exclusions contribute their clipped duration instead of being discarded. The input dataframe is not modified.
     """
-    if not exclusionDF.empty:
-        # Step 1: Merge overlapping intervals in the exclusion DataFrame
-        exclusionDF = merge_intervals(exclusionDF=exclusionDF, start=col_start, end=col_end)
-
-        # Step 2: Filter intervals that fall within the specified range (start to end)
-        filt = (exclusionDF[col_start] >= start) & (exclusionDF[col_end] <= end)
-        recordDF = exclusionDF.loc[filt]
-
-        # Step 3: Calculate the duration of each interval in seconds
-        recordDF.loc[:, ["Time Difference"]] = recordDF.apply(lambda row: (row[col_end] - row[col_start]).total_seconds(), axis=1)
-
-        # Step 4: Calculate the total excluded time
-        total_time = recordDF["Time Difference"].sum()  # Use `sum` instead of `max` for cumulative duration
-    else:
-        # If the exclusionDF is empty, then there is no excluded time
-        total_time = 0
-
-    return total_time
-
+    if end <= start:
+        raise ValueError('Exclusion window end must be later than start.')
+    if exclusionDF.empty:
+        return 0.0
+    intervals = merge_intervals(exclusionDF, col_start, col_end)
+    intervals = intervals.loc[(intervals[col_start] < end) & (intervals[col_end] > start)].copy()
+    return (intervals[col_end].clip(upper=end) - intervals[col_start].clip(lower=start)).dt.total_seconds().sum()
 
 def OperationalFactorsAnalysis(CRDF, DRDF):
     """
-    Analyzes operational factors for a test center and its solution based on provided records.
-
-    Parameters:
-        - CRDF (DataFrame): DataFrame containing emission data for the test center.
-        - CRDF (DataFrame): DataFrame containing reported data.
-
-    Returns:
-        - test center offline fraction
-        - solution offline fraction
+        Analyzes operational factors for a test center and its solution based on provided records.
+        Parameters:
+            - CRDF (DataFrame): DataFrame containing emission data for the test center.
+            - CRDF (DataFrame): DataFrame containing reported data.
+        Returns:
+            - test center offline fraction
+            - solution offline fraction
     """
 
+    # Classification flags can be scalar strings or aggregated lists. Matching
+    # their textual content handles both representations consistently.
+    CRDF, DRDF = CRDF.copy(), DRDF.copy()
+    CRDF['tc_Classification'] = CRDF['tc_Classification'].astype(str)
+    DRDF['dr_Classification'] = DRDF['dr_Classification'].astype(str)
     # Calculate the operational fractions for the solution
     try:
         Total_TC_time = CRDF["time_diffs"].sum()
         # Filter valid center data when not under maintenance/offline  - data during test center online time
-        Online_TestCenderData = CRDF.loc[CRDF["tc_Classification"] != "Maintenance Record: Data Excluded"]
+        Online_TestCenderData = CRDF.loc[~CRDF["tc_Classification"].str.contains("Maintenance Record: Data Excluded", regex=False)]
         Online_TC_time = Online_TestCenderData["time_diffs"].sum()  # Total operational time in seconds
         TC_nonoperationtime = Total_TC_time - Online_TC_time
 
         # Evaluating solution online datetime
-        filt = (DRDF["dr_Classification"] == "Offline Record: Data Excluded") | (DRDF["OriginalReport"] == "False")
+        filt = (DRDF["dr_Classification"].str.contains("Offline Record: Data Excluded", regex=False)) | (DRDF["OriginalReport"] == "False")
         Online_SolData = DRDF.loc[~filt]
         Online_solTime = Online_SolData["time_diffs"].sum()
         Sol_nonoperationtime = Total_TC_time - Online_solTime
@@ -427,76 +376,27 @@ def OperationalFactorsAnalysis(CRDF, DRDF):
 
 def reportingDelay(detectionReportDF, dr_endTime, dr_ReceivedTime, timeBasisFactor):
     """
-    Calculates the reporting delay for each record in a DataFrame.
-
-    Parameters:
-        - detectionReportDF (DataFrame): DataFrame containing detection reports.
-        - dr_endTime (str): Column name for the emission end time in the DataFrame.
-        - dr_ReceivedTime (str): Column name for the report received time in the DataFrame.
-        - timeBasisFactor (float): Factor to scale the delay time (e.g., 3600 for hours, 60 for minutes).
-
-    Returns:
-        - np.ndarray: A NumPy array containing the reporting delay for each record. Returns None for invalid rows.
+        Return (receipt - report end) in the requested units, preserving UTC offsets.
+        Missing receipt times are omitted. Negative delays are retained because a
+        report may arrive before its declared observation period has ended.
     """
-    # Ensure the required columns exist in the DataFrame
-    if dr_endTime not in detectionReportDF.columns or dr_ReceivedTime not in detectionReportDF.columns:
+    if timeBasisFactor <= 0:
+        raise ValueError('timeBasisFactor must be positive.')
+    if dr_endTime not in detectionReportDF or dr_ReceivedTime not in detectionReportDF:
         return np.array([])
-
-    else:
-        # Ensure the start and received times are datetime-like for calculations
-        detectionReportDF_copy = detectionReportDF.copy(deep=True)
-        detectionReportDF_copy = detectionReportDF_copy.loc[detectionReportDF_copy[dr_ReceivedTime] != ""]
-        detectionReportDF_copy[dr_ReceivedTime] = pd.to_datetime(detectionReportDF_copy[dr_ReceivedTime], errors='coerce')
-        detectionReportDF_copy[dr_endTime] = detectionReportDF_copy[dr_endTime].apply(lambda dt: dt.replace(tzinfo=timezone.utc))
-        detectionReportDF_copy[dr_ReceivedTime] = detectionReportDF_copy[dr_ReceivedTime].apply(lambda dt: dt.replace(tzinfo=timezone.utc))
-
-        # Calculate reporting delay with a check for null, NaN, or None values
-        def calculate_delay(row):
-            end_time = row[dr_endTime]
-            received_time = row[dr_ReceivedTime]
-
-            # Return None if either datetime is invalid
-            if pd.isna(end_time) or pd.isna(received_time):
-                return None
-            return (received_time - end_time).total_seconds() / timeBasisFactor
-        detectionReportDF_copy.loc[:, ["Reporting Delay"]] = detectionReportDF_copy.apply(lambda row: calculate_delay(row), axis=1)
-
-        # Filter out None values before converting to NumPy array
-        valid_delays = detectionReportDF_copy["Reporting Delay"].dropna()
-
-        # Convert valid delays to a NumPy array and return
-        reportingDelay = valid_delays.to_numpy()
-
-        return reportingDelay
+    received = pd.to_datetime(detectionReportDF[dr_ReceivedTime], utc=True, errors='coerce')
+    end_column = f'{dr_endTime}_Original' if f'{dr_endTime}_Original' in detectionReportDF else dr_endTime
+    ended = pd.to_datetime(detectionReportDF[end_column], utc=True, errors='coerce')
+    return ((received - ended).dt.total_seconds() / timeBasisFactor).dropna().to_numpy()
 
 def surveytime(DF, startTime, endTime, timeBasisFactor):
     """
-    Calculate the survey time for a DataFrame based on start and end time columns.
-
-    Parameters:
-        - DF (pd.DataFrame): Input DataFrame containing the start and end time columns.
-        - startTime (str): Column name for the test center start time.
-        - endTime (str): Column name for the performer stop time.
-        - timeBasisFactor (float): Factor to convert time difference (in seconds) to desired units.
-
-    Returns:
-        - np.ndarray: Array of survey times calculated as (endTime - startTime) / timeBasisFactor.
+        Return survey durations without changing the caller's dataframe.
     """
-
-    if not DF.empty:
-        # Convert start and end times to datetime format, coercing errors to NaT
-        DF[startTime] = pd.to_datetime(DF[startTime], errors='coerce')
-        DF[endTime] = pd.to_datetime(DF[endTime], errors='coerce')
-
-        # Calculate survey time in seconds and divide by timeBasisFactor
-        DF["Survey Time"] = (DF[endTime] - DF[startTime]).dt.total_seconds()/timeBasisFactor
-
-        # Drop NaN values and return as a NumPy array
-        surveytimes = DF["Survey Time"].dropna().to_numpy()
-
-        # Drop column name
-        DF.drop(columns="Survey Time", inplace=True)
-        return surveytimes
-
-    else:
+    if timeBasisFactor <= 0:
+        raise ValueError('timeBasisFactor must be positive.')
+    if DF.empty:
         return np.array([])
+    starts = pd.to_datetime(DF[startTime], utc=True, errors='coerce')
+    ends = pd.to_datetime(DF[endTime], utc=True, errors='coerce')
+    return ((ends - starts).dt.total_seconds() / timeBasisFactor).dropna().to_numpy()

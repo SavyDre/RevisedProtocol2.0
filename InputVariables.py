@@ -5,7 +5,7 @@ def inputVariables():
     """
     A comprehensive description of the input variables for the classification analysis and performance metrics.
     Note: Ensure that all datetimes in the dataframes are in UTC with a common format. The only exception is the start/end datetime in the reported detection and offline report which must be in the form:  <start>/<end> - <yyyy-mm-ddThh:mm:ssZ>/<yyyy-mm-ddThh:mm:ssZ>
-    - data[OfflineRecord] contains data required from the offline record provided the solution.
+    - data[OfflineRecord] contains data required from the offline record provided by the solution.
         + OfflineDateTime: The column header of start date time of the offline period. It already has a default value which must not be changed.
         + OnlineDateTime: The column header of end date time of the offline period. It already has a default value which must not be changed.
 
@@ -21,9 +21,7 @@ def inputVariables():
     - data[DetectionReportData] contains relevant data from the detection report provided by the solutions.
         + StartDateTime: The column header of the start date time of the detection report. It already has a default value which must not be changed.
         + EndDateTime: The column header of the end date time of the detection report. It already has a default value which must not be changed.
-        + EmissionRate: The column header of the reported emission rate.
-        + EmissionRateLower: The column header of the lower bound on the reported emission rate.
-        + EmissionRateUpper: The column header of the upper bound on the reported emission rate.
+        + EmissionRate: The column header of the emission rate of the detection report.
         + ReportIDs: The column header of the observation report ID.
         + BoundingXY: The column header of the GPS coordinates (defined as WKT polygons) defining the bounding area in which a detection report is valid.
           The polygon must form a closed boundary (i.e., the first and last coordinates in the polygon must be the same) and and of this format depending in the number of vertices.
@@ -31,26 +29,21 @@ def inputVariables():
         + BoundingZMinimum: The column header of the minimum height forming a controlled volume in a detection report.
         + BoundingZMaximum: The column header of the maximum height forming a controlled volume in a detection report.
         + BoundingName: The column header of the localization identifier which can be used to map bounding volumes for each detection report.
-        + ReceivedTime: The column header of the time stamp when the observation report was receievd by the test center.
+        + ReceivedTime: The column header of the time stamp when the observation report was received by the test center.
         + detection: The column header of the detection report for mode 2 reporting (yes/no).
         + Method: Pre-defined methods used for applying thresholding. As at now, 3 methods have been defined.
-            * Above Threshold Across Duration: Produces a thresholding value of 1 when the cummulative emissions duration at
+            * Above Threshold Across Duration: Produces a thresholding value of 1 when the cumulative emissions duration at
               a timestep/instance > specified thresholding duration (default = 0), and controlled release/estimated emission
               rate > baseline estimate + detection threshold above baseline. If condition is not met, thresholding value is 0.
             * Rolling Average: Produces a thresholding value of 1 when controlled release/estimated emission rate at a given
               timestep is > the rolling average rate/estimate evaluated over a specified thresholding duration. If condition
               is not met, thresholding value is 0.
-            * Random Sample Average: Produces a thresholding value of 1 when the mean of random samples of controlled
-              release/estimated emission rate with total duration <= specified thresholding duration, is > than baseline
-              estimate + detection threshold above baseline. If the condition is not met, then thresholding value is 0.
         + baselineEmissionRate: A float of the average baseline emission rate by the solution. It must have the same unit as
           the estimated emission rate.
         + ThresholdDuration:  An integer of the thresholding duration specified by the solution. Must have the same unit as
           the time resolution frequency (default is minutes).
         + ThresholdRateAboveBaseline: A float of the detection threshold above the average baseline emission rate by the
           solution. It must have the same unit as the estimated emission rate.
-        + nSampling: An integer specifying the number of samples to be generated when using Random Sample Average method as
-          thresholding method.
         + listOfVariables2Sum (default is None): A list of column headers in the detection report of which the sum of
           the data with the same time step (when aggregated) is of interest. For mode 1 reporting, the list must contain
           the column header of emission rate in the detection report.
@@ -76,12 +69,10 @@ def inputVariables():
         + StartDateTime: The column header of the start date time of the controlled release data.
         + EndDateTime: The column header of the end date time of the controlled release data.
         + EmissionRate: The column header of the emission rate of the controlled release data.
-        + EmissionRateLower: The column header of the lower bound on the controlled release rate.
-        + EmissionRateUpper: The column header of the upper bound on the controlled release rate.
         + SourceIDs: The column header of the unique source IDs associated with controlled releases.
         + BoundingXY: The column header of the GPS coordinates (defined as WKT polygons) defining the bounding area in
           which a controlled release is valid. The polygon must form a closed boundary (i.e., the first and last
-          coordinates in the polygon must be the same) and of this format depending in the number of vertices. This
+          coordinates in the polygon must be the same) and of this format depending on the number of vertices. This
           examples shows an example of a polygon of 3 vertices: "POLYGON ((40.59508012712645 -105.1400239508514,
           40.59516024495923 -105.1401361785956, 40.59507806685163 -105.1402325404461, 40.59508012712645 -105.1400239508514))"
         + BoundingZMinimum: The column header of the minimum height forming a controlled volume for controlled release.
@@ -159,7 +150,7 @@ def inputVariables():
             * xstep (default 0.0001): The x-axis data interval/step.
             * xScale (default linear): The type of scale applied on the x-axis.
             * yScale (default linear): The type of scale applied on the y-axis.
-            * desiredLDLFraction (default 0.9): The y-axis data at which which to evaluate probability of detection.
+            * desiredLDLFraction (default 0.9): The y-axis data at which to evaluate probability of detection.
             * Nbootstrap (default 500): An integer representing the number of bootstrapping
             * xlabel: The x-axis label.
             * legendloc: (default lower right): The location of the plot legend.
@@ -173,7 +164,7 @@ def inputVariables():
             * xstep (default 0.0001): The x-axis data interval/step.
             * xScale (default linear): The type of scale applied on the x-axis.
             * yScale (default linear): The type of scale applied on the y-axis.
-            * desiredLDLFraction (default 0.9): The y-axis data at which which to evaluate probability of detection.
+            * desiredLDLFraction (default 0.9): The y-axis data at which to evaluate probability of detection.
             * Nbootstrap (default 500): An integer representing the number of bootstrapping
             * xlabel: The x-axis label
             * legendloc (default lower right): The location of the plot legend.
@@ -204,55 +195,57 @@ def inputVariables():
             * xlimit: The lower and upper limit of the x-axis data specified on the basis of the unit specified.
             * ylimit: The lower and upper limit of the y-axis data specified on the basis of the unit specified.
             * legendloc (default lower right): The location of the plot legend.
-            * IncludeAll (default False): A boolean indicating if to include excluded data in the analysis
     """
 
     data = {
         "OfflineRecord": {
             "OfflineDateTime": 'StartTime', # This must not be changed. Ensure that no column titled 'StartTime' exists in the file.
-            "OnlineDateTime": 'EndTime' # This must not be changed. Ensure that no column titled 'EndTime' exists in the file.
+            "OnlineDateTime": 'EndTime', # This must not be changed. Ensure that no column titled 'EndTime' exists in the file.
+        },
+        "PassiveObservation": {
+            "StartDateTime": 'StartTime', # This must not be changed. Ensure that no column titled 'StartTime' exists in the file.
+            "EndDateTime": 'EndTime', # This must not be changed. Ensure that no column titled 'EndTime' exists in the file.
         },
         "OperatorLog": {
             "StartDateTime": None,
             "EndDateTime": None,
-            "NosOfAssetsSurveyed": None
+            "NosOfAssetsSurveyed": None,
         },
         "MaintenanceRecord": {
-            "StartDateTime": None,
-            "EndDateTime": None,
+            "StartDateTime": 'StartTime', # Column name for the start time in UTC
+            "EndDateTime": 'EndTime', # Column name for the end time in UTC
         },
 
         "DetectionReportData": {
             "StartDateTime": 'StartTime', # This must not be changed. Ensure that no column titled 'StartTime' exists in the file.
             "EndDateTime": 'EndTime', # This must not be changed. Ensure that no column titled 'EndTime' exists in the file.
-            "EmissionRate": None,
+            "EmissionRate": "EmissionRate",
+            "ReportIDs": "ObservationReportID",
             "EmissionRateLower": None,
             "EmissionRateUpper": None,
-            "ReportIDs": None,
             "BoundingXY": None,
             "BoundingZMinimum": None,
             "BoundingZMaximum": None,
             "BoundingName": None,
             "ReceivedTime": None,
             "detection": None,
-            "Method": None,
-            "baselineEmissionRate": None,
-            "ThresholdDuration": None,
-            "ThresholdRateAboveBaseline": None,
-            "nSampling": None,
-            "listOfVariables2Sum": None,
-            "listOfVariables2Average": None, # if "detection" is reported, then it must be contained in this list.
-            "listOfVariables2ListUnique": None,
+            "Method": "Above Threshold Across Duration",
+            "baselineEmissionRate": 896,
+            "ThresholdDuration": 0, # use 0 if not provided
+            "ThresholdRateAboveBaseline": 400,
+            "listOfVariables2Sum": ['EmissionRate'],
+            "listOfVariables2Average": [], # if "detection" is reported, then it must be contained in this list.
+            "listOfVariables2ListUnique": ["ObservationReportID"],
             "listOfVariables2Max": None,
             "listOfVariables2Min": None,
-            "listOfVariables2ObtainFirst": None, # if "ReceivedTime" is available, then it must be contained in this list.
-            "listOfVariables2ObtainLast": None
+            "listOfVariables2ObtainFirst": None, # if "ReceivedTime" is available, then it must be contained in this list. ["ReceivedTime"]
+            "listOfVariables2ObtainLast": None,
         },
 
         "ControlledReleaseData": {
-            "StartDateTime": None,
-            "EndDateTime": None,
-            "EmissionRate": None,
+            "StartDateTime": 'UTCStart',
+            "EndDateTime": 'UTCEnd',
+            "EmissionRate": 'ControlledReleaseRate',
             "EmissionRateLower": None,
             "EmissionRateUpper": None,
             "SourceID": None,
@@ -260,15 +253,15 @@ def inputVariables():
             "BoundingZMinimum": None,
             "BoundingZMaximum": None,
             "BoundingName": None,
-            "baselineEmissionRate": None,
-            "listOfVariables2Sum": None,
-            "listOfVariables2Average": None,
-            "listOfVariables2ListUnique": None,
+            "baselineEmissionRate": 900,
+            "listOfVariables2Sum": ['ControlledReleaseRate'],
+            "listOfVariables2Average": ["WindSpeed"],
+            "listOfVariables2ListUnique": ["tc_EquipmentGroupID"],
             "listOfVariables2Max": None,
             "listOfVariables2Min": None,
             "listOfVariables2ObtainFirst": None,
             "listOfVariables2ObtainLast": None,
-            "ASE": {
+            "ASE": { # This is current configured for the set up at METEC, can be modified to suite the needs of the user.,
                 "WellPad4": {
                     "BoundingXY": "POLYGON ((40.59552772212062 -105.1396852051655, 40.59601267917348 -105.139683347761, 40.59600301434005 -105.1405294847709, 40.59554745867481 -105.1405484620506, 40.59552772212062 -105.1396852051655))",
                     "BoundingZ": [0.0, 25],
@@ -304,14 +297,14 @@ def inputVariables():
                         "BoundingZ": [None, None],
                         "ReferenceCoord": [None, None]
                                 }
-                }
-        },
+                    }
+                },
         "Plotting": {
             "TTA": {
                 "plot": True, # A boolean indicating if the plot should be made.
                 "timeFactor": 1/3600,
                 "unit": "hours",
-                "bins": 30,
+                "bins": 0.2, # Bin width (i.e., 0.2 hours increment)
                 "xlimit": None,
                 "ylimit": None,
                 "legendloc": 'upper right'
@@ -320,7 +313,7 @@ def inputVariables():
                 "plot": True, # A boolean indicating if the plot should be made.
                 "timeFactor": 1/3600,
                 "unit": "hours",
-                "bins": 30,
+                "bins": 0.2, # Bin width (i.e., 0.2 hours increment)
                 "xlimit": None,
                 "ylimit": None,
                 "legendloc": 'upper right'
@@ -329,7 +322,7 @@ def inputVariables():
                 "plot": True, # A boolean indicating if the plot should be made.
                 "timeFactor": 1/86400,
                 "unit": "days",
-                "bins": 30,
+                "bins": 0.2, # Bin width (i.e., 0.2 hours increment)
                 "xlimit": None,
                 "ylimit": None,
                 "legendloc": 'upper center'
@@ -338,61 +331,46 @@ def inputVariables():
                 "plot": True, # A boolean indicating if the plot should be made.
                 "timeFactor": 1/3600,
                 "unit": "hours",
-                "bins": 30,
+                "bins": 0.2,
                 "xlimit": None,
                 "ylimit": None,
                 "legendloc": 'upper right'
             },
-            "POD-LR": { # plotting POD curve using logistic regression
+            "POD-LR": {# plotting POD curve using logistic regression
                 "plot": True, # A boolean indicating if the plot should be made.
-                "scalingFactor": 1,
-                "xCategory": None,
-                "unit": r"$\mathrm{g~CH_4/h}$",
-                "xlimit": (0.000001, 100000),
+                "scalingFactor": 1/1000, # 1/1000
+                "xCategory": "ControlledReleaseRate",
+                "unit": r"$\mathrm{kg~CH_4/h}$",
+                "xlimit": (0.001, 100), # for xScale being log: (0.000001, 100000)
                 "xScale": "log",
                 "yScale": "linear",
                 "desiredLDLFraction": 0.9,
                 "nSamples": 1000,
-                "Nbootstrap": 500,
+                "Nbootstrap": 1000,
                 "xlabel": "Release Rate above baseline",
-                "legendloc": 'upper left'
-            },
-            "POD-CF": { # plotting POD curve using curve fiting
-                "plot": True, # A boolean indicating if the plot should be made.
-                "scalingFactor": 1/1000,
-                "xCategory": None,
-                "unit": r"$\mathrm{kg~CH_4/h}$",
-                "xlimit": (0, 10),
-                "xstep": 1,
-                "xScale": "linear",
-                "yScale": "linear",
-                "desiredLDLFraction": 0.9,
-                "nSamples": 1000,
-                "Nbootstrap": 500,
-                "xlabel": "Release Rate above baseline",
-                "legendloc": 'lower right',
-                "a0s": list(np.linspace(0.001, 2, 7)),
-                "b0s": list(np.linspace(0.1, 10, 7)),
-                "bounds": ([1e-6, 1e-6], [+np.inf, +np.inf])
+                "legendloc": 'center left'
             },
             "SingleQuant": {
                 "plot": True, # A boolean indicating if the plot should be made.
-                "xCategory": None, # Test center release rate
+                "xCategory": "ControlledReleaseRate", # Test center release rate.
+                "colorBar": None,
+                "colorBarLabel": None,
                 "xCategoryLower": None,
                 "xCategoryUpper": None,
-                "yCategory": None, # Reported release rate
+                "yCategory": "EmissionRate", # Reported release rate
                 "yCategoryLower": None,
                 "yCategoryUpper": None,
-                "xScalingFactor": 1/1000,
-                "yScalingFactor": 1/1000,
-                "quantificationFactor": 3,
-                "xunit": r"$\mathrm{kg~CH_4/h}$",
-                "yunit": r"$\mathrm{kg~CH_4/h}$",
+                "xScalingFactor": 1, # 1/1000
+                "yScalingFactor": 1,
+                "quantificationFactor": 2,
+                "xunit": r"$\mathrm{g~CH_4/h}$", # r"$\mathrm{kg~CH_4/h}$"
+                "yunit": r"$\mathrm{g~CH_4/h}$", # r"$\mathrm{kg~CH_4/h}$"
                 "xScale": "log",
                 "yScale": "log",
-                "limits": (0.01, 100), # (0.01, 100),
-                "legendloc": 'lower right'
-            },
+                "limits": (1, 50000), # (0.01, 100),
+                "legendloc": 'lower right',
+                "minTrueRate": None},
+
             "AggQuant": {
                 "plot": True, # A boolean indicating if the plot should be made.
                 "xunit": "days",
@@ -402,7 +380,7 @@ def inputVariables():
                 "xlimit": None,
                 "ylimit": None,
                 "legendloc": 'upper left',
-                "IncludeAll": True,
+                "IncludeAll": False,
             }
 
         }

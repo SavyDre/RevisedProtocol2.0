@@ -1,26 +1,17 @@
+"""Export numerical results as CSV tables and scalar report values as LaTeX."""
 import pathlib
 import os
 import shutil
 import math
 import pandas as pd
 
-def writeOutputData(saveDir, datapath, classifiedDF, DetectionData, TestCenterData, quantDF, paperDict):
-    """Write all output data to directory"""
-
-    ## Drop Classification columns from the crDF and drDF dataframes
-    DetectionData = DetectionData.drop("dr_Classification", axis=1)
-    TestCenterData = TestCenterData.drop("tc_Classification", axis=1)
-
-    ## Remove nan and fill with -
-    classifiedDF.fillna(pd.NA, inplace=True)
-    DetectionData.fillna(pd.NA, inplace=True)
-    TestCenterData.fillna(pd.NA, inplace=True)
+def writeOutputData(saveDir, datapath, classifiedDF, DetectionData, TestCenterData, paperDict):
+    """Write the four result tables and LaTeX values without changing callers data."""
 
     ## Write data files
     classifiedDF.to_csv(pathlib.PurePath(datapath, "ClassifiedData.csv"), index=False)
     DetectionData.to_csv(pathlib.PurePath(datapath, "DetectionData.csv"), index=False)
     TestCenterData.to_csv(pathlib.PurePath(datapath, "TestCenterData.csv"), index=False)
-    quantDF.to_csv(pathlib.PurePath(datapath, "PairedQuantificationData.csv"), index=False)
 
     # Writing paper dict variables to report
     try:
@@ -69,11 +60,12 @@ def getVars(vars):
 
         if type(value) == float:
             # Round the value to 3 sig figs
-            if not math.isnan(value) and value != 0.0:
+            if math.isfinite(value) and value != 0.0:
                 value = round(value, 3 - int(math.floor(math.log10(abs(value)))) - 1)
         if key in varList:
             value = float(value)
-            value = round(value, 3 - int(math.floor(math.log10(abs(value)))) - 1)
+            if math.isfinite(value) and value != 0.0:
+                value = round(value, 3 - int(math.floor(math.log10(abs(value)))) - 1)
         script += ''.join(['\n\\newcommand{\\var', str(key), '}{', str(value), '}'])
     return script
 

@@ -1,3 +1,4 @@
+"""Read and write dictionaries used for emission-source spatial mappings."""
 import json
 
 def save_dict_to_json(dictionary, file_path):
@@ -20,20 +21,10 @@ def save_dict_to_json(dictionary, file_path):
 
 
 def load_dict_from_json(file_path):
-    """
-    Read a JSON file into a dictionary.
+    """Read a source-map object; invalid files fail before spatial classification."""
+    with open(file_path, 'r', encoding='utf-8-sig') as json_file:
+        dictionary = json.load(json_file)
+    if not isinstance(dictionary, dict):
+        raise ValueError('The emission-source mapper must be a JSON object.')
+    return dictionary
 
-    Parameters:
-    - file_path (str): The path of the JSON file to read.
-
-    Returns:
-    - dict: The dictionary read from the JSON file.
-    """
-    try:
-        with open(file_path, 'r') as json_file:
-            dictionary = json.load(json_file)
-        print(f"Dictionary successfully loaded from {file_path}")
-        return dictionary
-    except Exception as e:
-        print(f"Error reading JSON file: {e}")
-        return {}

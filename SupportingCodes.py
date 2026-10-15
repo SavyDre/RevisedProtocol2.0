@@ -1,3 +1,4 @@
+"""Configuration-loading and small validation helpers for the analysis entry point."""
 import ast
 import pandas as pd
 
@@ -32,7 +33,7 @@ def run_script_and_call(script_code, function_name='inputVariables'):
     :param function_name: The name of the function defined within the script
     :return:
     """
-    # Create a namespace to safely execute the script
+    # Execute trusted configuration code in its own namespace (this is not a sandbox).
     namespace = {}
 
     # Execute the script (defines the function)
@@ -55,7 +56,7 @@ def run_script_file_and_call(script_path, function_name='inputVariables'):
     :return:
     """
     #
-    with open(script_path, 'r') as f:
+    with open(script_path, 'r', encoding='utf-8-sig') as f:
         code = f.read()
     return run_script_and_call(code, function_name)
 
@@ -73,8 +74,7 @@ def reset_index(df, freq="min"):
 
 def validate_frequency(suppliedfreq, referencefreq):
     """
-        Validate whether the supplied frequency duration (in seconds)
-        is greater than the reference frequency duration.
+        Validate a positive fixed sampling step no longer than the reference step.
 
         Parameters
         ----------
@@ -86,16 +86,16 @@ def validate_frequency(suppliedfreq, referencefreq):
         Returns
         -------
         bool
-            True if supplied frequency duration < reference frequency duration.
+            True if 0 < supplied duration <= reference duration.
             False otherwise, with a printed warning.
     """
     try:
         # Convert both frequencies to seconds
-        supfreqdur = pd.Timedelta(suppliedfreq).total_seconds()
-        reffreqdur = pd.Timedelta(referencefreq).total_seconds()
+        supfreqdur = pd.tseries.frequencies.to_offset(suppliedfreq).nanos / 1e9
+        reffreqdur = pd.tseries.frequencies.to_offset(referencefreq).nanos / 1e9
 
         # Compare
-        if supfreqdur <= reffreqdur:
+        if 0 < supfreqdur <= reffreqdur:
             return True
         else:
             print(f"Unsupported frequency: {suppliedfreq}. Provided frequency must be less or equal to {referencefreq}.")
