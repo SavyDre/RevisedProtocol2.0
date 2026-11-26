@@ -268,7 +268,7 @@ def main(args):
         json.dump(vars(args), settings, indent=2, default=str)
 
     print("Evaluate data classification and performance metrics...")
-    CRDF, DRDF, ClassifiedDF, TTD, TTA, SurveyTime, ReportDelay, tc_offline_frac, sol_offline_frac = \
+    CRDF, DRDF, PairedDF, TTD, TTA, SurveyTime, ReportDelay, detections = \
         analysis(analyStarttime=startDateTime,
                  analyEndtime=endDateTime,
                  ASEs=ASEs,
@@ -329,13 +329,10 @@ def main(args):
                  tc_bufferDistance=bufferDistance,
                  dr_bufferDistance=bufferDistance)
 
-    # Include the main scalar results in the existing LaTeX export.
-    paperDict.update({'TestCenterOfflineFraction': tc_offline_frac, 'SolutionOfflineFraction': sol_offline_frac})
-    paperDict.update({label + 'Count': int(ClassifiedDF['Classification'].eq(label).sum()) for label in ('TP', 'FN', 'FP', 'TN')})
     print("Writing data to files..")
     writeOutputData(saveDir,
                     datapath=datafilepath,
-                    classifiedDF=ClassifiedDF,
+                    PairedDF=PairedDF,
                     DetectionData=DRDF,
                     TestCenterData=CRDF,
                     paperDict=paperDict)
@@ -343,14 +340,13 @@ def main(args):
     print("Plotting performance metrics..")
     if not getattr(args, 'no_plots', False):
         plotting(figurefilepath=figurefilepath,
-                 ClassifiedDF=ClassifiedDF,
+                 PairedDF=PairedDF,
                  TTD=TTD,
                  TTA=TTA,
                  CRDF=CRDF,
                  DRDF=DRDF,
                  SurveyTime=SurveyTime,
                  ReportDelay=ReportDelay,
-                 ThresholdRateAboveBaseline=DetectionReportLogVar["ThresholdRateAboveBaseline"],
                  tc_baselineEmissionRate=ControlledReleaseLogVar["baselineEmissionRate"],
                  minTrueRate=plottingVar["SingleQuant"]["minTrueRate"],
                  singleQuant_xCol=plottingVar["SingleQuant"]["xCategory"],
@@ -419,9 +415,6 @@ def main(args):
                  plot_LR=plottingVar["POD-LR"]["plot"],
                  plot_aggquant=plottingVar["AggQuant"]["plot"],
                  random_state=seed)
-
-    print(f"The test center was offline/not operating {tc_offline_frac * 100}% of the test duration")
-    print(f"The solution was offline/not operating {sol_offline_frac * 100}% of the test duration")
 
     end_time = time.time()
     print(f"Code executed in {(end_time - start_time)/3600:.6f} hours")
