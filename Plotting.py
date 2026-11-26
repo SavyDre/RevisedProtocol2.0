@@ -10,42 +10,28 @@ from FiguresBuilder import scatter
 from FiguresBuilder import withAfactor
 from Metrics import evaluateRelativeErrors
 
-def plotting(figurefilepath, TTD, TTA, SurveyTime, ReportDelay, tc_baselineEmissionRate, ThresholdRateAboveBaseline,
-             singleQuant_xCol, singleQuant_xLowerCol, singleQuant_xUpperCol, singleQuant_yCol, singleQuant_yLowerCol,
-             singleQuant_yUpperCol, singleQuant_xScalingFact, singleQuant_yScalingFact, CRDF, DRDF, singleQuant_xunit,
-             singleQuant_yunit, singleQuant_limit, singleQuant_quantFactor, singleQuant_xScale, singleQuant_yScale,
-             singleQuant_legendloc, singleQuant_cbar, singleQuant_cbar_lab, minTrueRate, aggQuant_xlimit, aggQuant_ylimit,
-             aggQuant_xunit, aggQuant_yunit, aggQuant_yScalingFact, aggQuant_legendloc,  TTD_timeFact, TTD_nBins,
-             TTD_xunit, TTD_xlimit, TTD_ylimit, TTD_legendloc, TTA_timeFact, TTA_nBins, TTA_xunit, TTA_xlimit,
-             TTA_ylimit, TTA_legendloc, RD_timeFact, RD_nBins, RD_xunit, RD_xlimit, RD_ylimit, RD_legendloc,
-             ST_nBins, ST_xunit, ST_xlimit, ST_ylimit, ST_legendloc, ST_timeFact, desiredLDLFraction,
-             ClassifiedDF, LR_xCol, LR_xScalingFact, LR_xunit, LR_xlimit, LR_legendloc, LR_nSamples, LR_xScale,
-             LR_yScale, LR_xLabel, plot_singlequant, plot_TTD, plot_TTA, plot_RD, plot_ST, plot_LR, plot_aggquant,
-             random_state=0, LR_Nbootstrap=None):
+def plotting(figurefilepath, PairedDF, TTD, TTA, SurveyTime, ReportDelay, tc_baselineEmissionRate, singleQuant_xCol,
+             singleQuant_xLowerCol, singleQuant_xUpperCol, singleQuant_yCol, singleQuant_yLowerCol, singleQuant_yUpperCol,
+             singleQuant_xScalingFact, singleQuant_yScalingFact, CRDF, DRDF, singleQuant_xunit, singleQuant_yunit,
+             singleQuant_limit, singleQuant_quantFactor, singleQuant_xScale, singleQuant_yScale, singleQuant_legendloc,
+             singleQuant_cbar, singleQuant_cbar_lab, minTrueRate, aggQuant_xlimit, aggQuant_ylimit, aggQuant_xunit,
+             aggQuant_yunit, aggQuant_yScalingFact, aggQuant_legendloc, TTD_timeFact, TTD_nBins, TTD_xunit, TTD_xlimit,
+             TTD_ylimit, TTD_legendloc, TTA_timeFact, TTA_nBins, TTA_xunit, TTA_xlimit, TTA_ylimit, TTA_legendloc,
+             RD_timeFact, RD_nBins, RD_xunit, RD_xlimit, RD_ylimit, RD_legendloc, ST_nBins, ST_xunit, ST_xlimit, ST_ylimit,
+             ST_legendloc, ST_timeFact, desiredLDLFraction, LR_xCol, LR_xScalingFact, LR_xunit, LR_xlimit, LR_legendloc,
+             LR_nSamples, LR_xScale, LR_yScale, LR_xLabel, plot_singlequant, plot_TTD, plot_TTA, plot_RD, plot_ST, plot_LR,
+             plot_aggquant, random_state=0, LR_Nbootstrap=None):
     """
         Generate various plots for the analysis.
         Returns: None
     """
-    tpdf = ClassifiedDF.loc[ClassifiedDF['Classification'] == "TP"]
-    fndf = ClassifiedDF.loc[ClassifiedDF['Classification'] == "FN"]
-    tndf = ClassifiedDF.loc[ClassifiedDF['Classification'] == "TN"]
-    fpdf = ClassifiedDF.loc[ClassifiedDF['Classification'] == "FP"]
-
-    def percentage(count, denominator):
-        # An absent reference population has an undefined fraction, not zero.
-        return round(count * 100 / denominator, 2) if denominator else float('nan')
-
-    print(f"TPF: {percentage(len(tpdf), len(tpdf) + len(fndf))}")
-    print(f"FNF: {percentage(len(fndf), len(tpdf) + len(fndf))}")
-    print(f"TNF: {percentage(len(tndf), len(tndf) + len(fpdf))}")
-    print(f"FPF: {percentage(len(fpdf), len(fpdf) + len(tpdf))}")
 
     if plot_singlequant:
         try:
             print("Plot scatter plot of quantification estimations- with density plots")
             start_time = time.time()
             # Calculate the percentage of estimates within reported emissions estimates within the factor: singleQuant_quantFactor
-            quantDF = ClassifiedDF.loc[ClassifiedDF["Classification"].isin(["TP", "FN", "FP", "TN"])]
+            quantDF = PairedDF.loc[PairedDF["Classification"].isin(["TP", "FN", "FP", "TN"])]
             quantDF = evaluateRelativeErrors(quantDF=quantDF, minTrueRate=minTrueRate,
                                              cr_emission=singleQuant_xCol,
                                              dr_emission=singleQuant_yCol)
@@ -252,14 +238,14 @@ def plotting(figurefilepath, TTD, TTA, SurveyTime, ReportDelay, tc_baselineEmiss
         try:
             print("Plot POD curve using Logistic Regression")
             start_time = time.time()
-            LOGISTICREGRESSION(Df=ClassifiedDF,
+            LOGISTICREGRESSION(Df=CRDF,
                                filePath=figurefilepath,
                                fileName="LogisticRegression.png",
                                desiredLDLFraction=desiredLDLFraction,
                                Nbootstrap=LR_Nbootstrap,
                                fontsize=11,
                                xCategory=LR_xCol,
-                               yCategory='Classification',
+                               yCategory="tc_Classification",
                                xlabel=LR_xLabel,
                                xunits=LR_xunit,
                                figsize=(4.5, 3.5),
@@ -274,9 +260,12 @@ def plotting(figurefilepath, TTD, TTA, SurveyTime, ReportDelay, tc_baselineEmiss
                                mColors='b',
                                bColors='#B0C4DE',
                                loc=LR_legendloc,
+                               block_duration="15min",
+                               timeCategory="Time",
                                baseline=tc_baselineEmissionRate,
-                               ThresholdRateAboveBaseline=ThresholdRateAboveBaseline,
-                               dpi=400, random_state=random_state, n_curve_points=LR_nSamples)
+                               dpi=400, random_state=random_state,
+                               n_curve_points=LR_nSamples)
+
             # Adjust layout
             plt.tight_layout()
             end_time = time.time()
@@ -284,17 +273,17 @@ def plotting(figurefilepath, TTD, TTA, SurveyTime, ReportDelay, tc_baselineEmiss
         except Exception as e:
             print(f"Could not plot POD curve using Logistic Regression due to {e}")
 
-        if 'Capture fraction' in ClassifiedDF.columns:
-            try:
-                print("Plot the release rate vs capture fraction")
-                start_time = time.time()
-                scatter(df=ClassifiedDF, xCategory=LR_xCol, yCategory="Capture fraction",
-                        classificationCategory="Classification", tp_only=True, xlabel="Controlled release rate",
-                        xunits="g CH4/h", ylabel="Fraction of Duration Detected ", xScale="linear", xmin=None, xmax=None,
-                        figsize=(4.5, 3.5), fontsize=9, marker_size=13, alpha=0.8, ax=None, filePath=figurefilepath)
-                end_time = time.time()
-                print(f"Plot release rate vs capture fraction executed in {end_time - start_time:.6f} seconds")
-            except Exception as e:
-                print(f"Could not plot release rate vs capture fraction due to {e}")
+        # if 'Capture fraction' in ClassifiedDF.columns:
+        #     try:
+        #         print("Plot the release rate vs capture fraction")
+        #         start_time = time.time()
+        #         scatter(df=ClassifiedDF, xCategory=LR_xCol, yCategory="Capture fraction",
+        #                 classificationCategory="Classification", tp_only=True, xlabel="Controlled release rate",
+        #                 xunits="g CH4/h", ylabel="Fraction of Duration Detected ", xScale="linear", xmin=None, xmax=None,
+        #                 figsize=(4.5, 3.5), fontsize=9, marker_size=13, alpha=0.8, ax=None, filePath=figurefilepath)
+        #         end_time = time.time()
+        #         print(f"Plot release rate vs capture fraction executed in {end_time - start_time:.6f} seconds")
+        #     except Exception as e:
+        #         print(f"Could not plot release rate vs capture fraction due to {e}")
     
     return
