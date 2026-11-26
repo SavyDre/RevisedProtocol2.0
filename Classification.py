@@ -614,7 +614,6 @@ def frequency_to_seconds(freq_str):
     return timedelta.total_seconds()
 
 class ThresholdingTimeSeriesData:
-
     def __init__(self, TimeSeriesData):
         self.TimeSeriesData = TimeSeriesData
 
@@ -860,7 +859,6 @@ def merge_intervals(exclusionDF, start, end):
 
     return pd.DataFrame(merged_intervals, columns=[start, end])
 
-
 def flagData(dataDF, exclusionDF, flag, classification, start_exc, end_exc, freq="1min", ID=None,
              bufferTime=(0, 0)):
     """
@@ -928,10 +926,12 @@ def flagData(dataDF, exclusionDF, flag, classification, start_exc, end_exc, freq
             # Mask all rows of those IDs
             mask = dataDF[ID].isin(overlapping_ids)
 
-        dataDF.loc[mask, classification] = flag
+        # Identify rows without an existing classification.
+        unclassified = (dataDF[classification].isna() | dataDF[classification].eq(""))
+        # Apply the flag only to overlapping, unclassified rows.
+        dataDF.loc[mask & unclassified, classification] = flag
 
     return dataDF
-
 
 def check_if_dataframe_column_exists(df, column_name):
     """
@@ -1046,6 +1046,43 @@ def samplefromdata(CRDF, DRDF, cr_DateTime, dr_DateTime, nSampling, cr_releaseRa
         print(f"Error: {e}")
         return CRDF, DRDF, pd.DataFrame(), pd.DataFrame()
 
+def mergeRuns(classified, cr_emissionrate, tc_localization=None):
+    """
+        Merge consecutive rows sharing the same emission rate,
+        classification, and optionally localization.
+
+        Parameters
+        ----------
+        classified (pandas.DataFrame): Controlled-release data, ordered chronologically.
+        cr_emissionrate (str): Column containing the controlled-release emission rate.
+        tc_localization (str or None, optional): Column containing localization/equipment group.
+
+        Returns (pandas.DataFrame): One row per consecutive run, preserving its emission rate,
+            classification, and optionally localization.
+        -------
+    """
+    crdf = classified.copy()
+
+    # Round emission rates to avoid insignificant differences
+    crdf[cr_emissionrate] = crdf[cr_emissionrate].round(5)
+
+    # Columns determining whether consecutive rows belong to a run
+    group_columns = [cr_emissionrate, "tc_Classification"]
+
+    if tc_localization is not None:
+        crdf[tc_localization] = crdf[tc_localization].fillna(0)
+        group_columns.append(tc_localization)
+
+    # Identify changes between consecutive rows
+    run_id = crdf[group_columns].ne(crdf[group_columns].shift()).any(axis=1).cumsum()
+
+    # Retain the first value of each run
+    aggregation = {cr_emissionrate: (cr_emissionrate, "first"), "Classification": ("tc_Classification", "first"),}
+
+    if tc_localization is not None:
+        aggregation[tc_localization] = (tc_localization, "first")
+
+    return crdf.groupby(run_id, sort=False).agg(**aggregation).reset_index(drop=True)
 
 def DefaultRollingAvgApplication(DRDF, CRDF, detection, dr_releaseRate, cr_releaseRate, dr_baselineEmissionRate,
                                  tc_baselineEmissionRate, RollingAverageThreshold, RollingAverageWindow, freq,
@@ -1092,7 +1129,6 @@ def DefaultRollingAvgApplication(DRDF, CRDF, detection, dr_releaseRate, cr_relea
         DRDF = DRDF.rename(columns={str(detection): "dr_Detection"})
 
     return DRDF, CRDF
-
 
 def AboveThresholdAcrossCumDurationApplication(DRDF, CRDF, detection, dr_baselineEmissionRate, tc_baselineEmissionRate,
                                                dr_releaseRate, cr_releaseRate, DetectionRateThresholdAboveBaseline,
@@ -1245,7 +1281,6 @@ def thresholdingApplication(CRDF, DRDF, detection, cr_releaseRate, dr_releaseRat
         return DRDF, CRDF
 
     raise ValueError(f"Unsupported threshold method: {Method!r}. Use 'Rolling Average' or 'Above Threshold Across Duration'.")
-
 
 def compareDataFrames(CRDF, DRDF, tc_Detected="tc_Detection", dr_Detected="dr_Detection",
                       tc_Classification="tc_Classification", dr_Classification="dr_Classification"):
@@ -1486,7 +1521,6 @@ def compareSummarizedData(CRDF, DRDF, tc_Detected="tc_Detection", dr_Detected="d
     if not overlaps.empty:
         pairedDF = overlaps.merge(CRDF, on="cr_index", how="left", suffixes=("", "_cr")).merge(DRDF, on="dr_index",
                                    how="left", suffixes=("_cr", "_dr"))
-
     else:
         pairedDF = pd.DataFrame()
 
@@ -1564,7 +1598,6 @@ def compareSummarizedData(CRDF, DRDF, tc_Detected="tc_Detection", dr_Detected="d
             labels = set(pairedDF.loc[pairedDF[key].eq(index), 'Classification']) if key in pairedDF else set()
             frame.at[index, column] = next((label for label in priority if label in labels), None)
 
-
     # ===================================================================================================================
     # Cleanup
     # ===================================================================================================================
@@ -1604,7 +1637,6 @@ def timestep_correction(*listofcols, df, eventID):
 
     if eventID is None or eventID not in df.columns:
         raise ValueError(f"`eventID` is None or not found in DataFrame columns: {df.columns}")
-
     # Identify rows where the event ID changes (i.e., start of a new group)
     change_points = df[eventID] != df[eventID].shift()
 
@@ -1652,7 +1684,6 @@ def process_lists(DF, *lists):
                 continue
             # Convert values to float, keeping nulls as np.nan
             DF[col] = DF[col].apply(lambda x: float(x) if pd.notnull(x) else np.nan)
-
     return DF
 
 def _validate_frequency(freq):
@@ -1852,11 +1883,9 @@ def _rows_changed(df, columns):
 def _unique_list(series):
     """
         Flatten nested values into ordered, unique non-null items; sets unordered.
-
         Parameters
         ----------
         series: Series whose scalar/nested values are flattened into unique non-null items.
-
         Local variables and comprehension/loop names
         --------------------------------------------
         result: Accumulated unique non-null items, preserving first encounter order.
@@ -2308,7 +2337,7 @@ def summarizeData(drdf, crdf, timefactor, dr_emissionrate, dr_detection=None, dr
                   listOfVariables2ListUnique_CR=None, listOfVariables2Max_CR=None, listOfVariables2Min_CR=None, *,
                   cr_emissionrate=None, split_zero_dr_by_all_cr_columns=True):
     """
-        Return CRdf, DRdf, cDF, dDF. Old positional argument order is retained.
+        Return CRdf, DRdf, cDF, dDF.
 
         Detection is optional: omit it or pass None. A named but absent detection
         column is treated as unavailable, so CR splitting depends on rate alone.
@@ -2324,29 +2353,29 @@ def summarizeData(drdf, crdf, timefactor, dr_emissionrate, dr_detection=None, dr
 
         Parameters
         ----------
-        drdf: DR observations with an interval-ending datetime index.
-        crdf: CR observations with interval-ending datetime index and source rate/aggregation columns.
-        timefactor: Positive time-basis conversion for rate integration: 1/3600 for rates per hour, 1 for rates per second.
-        dr_emissionrate: Required DR central-rate column name; original values define runs and numeric values calculate amounts.
-        dr_detection: Optional detection column name. None or an absent named column means unavailable; rate-based splitting still applies.
-        dr_classification: Required DR classification column name; retained unchanged by DR run extraction.
-        freq: Sampling interval accepted by pandas.Timedelta, e.g. "1min"; must be finite and positive.
-        listOfVariables2Sum_CR: CR rate-like column names. Each receives an integrated X_total and a full-window effective rate X; not ordinary sums.
-        listOfVariables2Average_CR: CR columns coerced to numeric and averaged over non-null values; these use ordinary available-value means.
-        listOfVariables2ListUnique_CR: CR columns flattened into ordered unique non-null lists. Missing tc_Classification is optional.
-        listOfVariables2Max_CR: CR columns reduced with pandas max without numeric coercion.
-        listOfVariables2Min_CR: CR columns reduced with pandas min without numeric coercion.
-        cr_emissionrate: Central CR-rate column name. Explicitly name it for multiple rate aggregations; a single requested rate can be inferred.
-        split_zero_dr_by_all_cr_columns: True compares every original CR column in eligible windows; False compares selected aggregation columns. Neither changes split eligibility.
+        - drdf: DR observations with an interval-ending datetime index.
+        - crdf: CR observations with interval-ending datetime index and source rate/aggregation columns.
+        - timefactor: Positive time-basis conversion for rate integration: 1/3600 for rates per hour, 1 for rates per second.
+        - dr_emissionrate: Required DR central-rate column name; original values define runs and numeric values calculate amounts.
+        - dr_detection: Optional detection column name. None or an absent named column means unavailable; rate-based splitting still applies.
+        - dr_classification: Required DR classification column name; retained unchanged by DR run extraction.
+        - freq: Sampling interval accepted by pandas.Timedelta, e.g. "1min"; must be finite and positive.
+        - listOfVariables2Sum_CR: CR rate-like column names. Each receives an integrated X_total and a full-window effective rate X; not ordinary sums.
+        - listOfVariables2Average_CR: CR columns coerced to numeric and averaged over non-null values; these use ordinary available-value means.
+        - listOfVariables2ListUnique_CR: CR columns flattened into ordered unique non-null lists. Missing tc_Classification is optional.
+        - listOfVariables2Max_CR: CR columns reduced with pandas max without numeric coercion.
+        - listOfVariables2Min_CR: CR columns reduced with pandas min without numeric coercion.
+        - cr_emissionrate: Central CR-rate column name. Explicitly name it for multiple rate aggregations; a single requested rate can be inferred.
+        - split_zero_dr_by_all_cr_columns: True compares every original CR column in eligible windows; False compares selected aggregation columns. Neither changes split eligibility.
 
         Local variables and comprehension/loop names
         --------------------------------------------
-        dr: Validated chronological DR observations.
-        cr: Validated chronological CR observations.
+        - dr: Validated chronological DR observations.
+        - cr: Validated chronological CR observations.
         _: Unused sampling Timedelta/seconds from _prepare.
-        d: Shared whole-DR-run output, returned as dDF.
-        c: Matching CR window/subrun output, returned as cDF.
-        rate_names / name: Unique rate aggregation candidates / candidate column name used to resolve the central rate consistently across all outputs.
+        - d: Shared whole-DR-run output, returned as dDF.
+        - c: Matching CR window/subrun output, returned as cDF.
+        - rate_names / name: Unique rate aggregation candidates / candidate column name used to resolve the central rate consistently across all outputs.
 
         Returns
         -------
@@ -2427,157 +2456,6 @@ def filterData(df, start, end, threshold):
 
     print(f"The number of rows excluded because the difference between start date time and end date time is less or equal to {threshold} is {initial_count - len(df)}")
     return df
-
-def mergeRunsV1(classified, cr_emissionrate, tc_localization, factor, freq):
-    """
-        Aggregate consecutive rows having the same Classification,
-        controlled release rate, and localization into unique runs.
-
-        Parameters
-        classified (pandas.DataFrame): DataFrame of paired controlled release and detection data.
-        cr_emissionrate (str): Column name containing the controlled release emission rate.
-        tc_localization (str): Column name containing the localization/equipment group.
-        factor (float) : Conversion factor from seconds to the time basis of the emission-rate data.
-        freq (str): Frequency of analysis, e.g. "1min", "30s", "5min".
-        Returns (pandas.DataFrame): DataFrame containing one row per consecutive run.
-    """
-
-    # Convert frequency to seconds
-    freq_duration = pd.Timedelta(freq).total_seconds()
-    # Columns that define a consecutive run
-    group_columns = ["Classification", cr_emissionrate, tc_localization]
-    # Create a copy so the original dataframe is not modified
-    crdf = classified.copy()
-    crdf[tc_localization] = crdf[tc_localization].fillna(0)
-    # Create a new group whenever any grouping column changes
-    crdf["shift"] = (crdf[group_columns].ne(crdf[group_columns].shift()).any(axis=1).cumsum())
-    # Calculate total emitted mass/quantity for each time step
-    crdf["Total"] = (crdf[cr_emissionrate] * freq_duration * factor)
-
-    # Aggregate consecutive runs
-    runs = (crdf.groupby("shift").agg(Total=("Total", "sum"), Count=("Total", "size"),
-                                      Classification=("Classification", "first"),
-                                      ControlledReleaseRate=(cr_emissionrate, "first"),
-                                      Localization=(tc_localization, "first")).reset_index(drop=True))
-
-    # Calculate average emission rate for each run
-    runs["EmissionRate"] = (runs["Total"] / (runs["Count"] * freq_duration * factor))
-    # Remove intermediate columns
-    runs.drop(columns=["Count", "Total", "ControlledReleaseRate"], inplace=True)
-    # Rename output columns back to original names
-    runs.rename(columns={"EmissionRate": cr_emissionrate, "Localization": tc_localization}, inplace=True)
-
-    return runs
-
-def mergeRuns(classified, cr_emissionrate, tc_localization, factor, freq):
-    """
-        Aggregate consecutive rows having the same controlled release rate
-        and localization into unique runs.
-
-        Classification rules for each run:
-            1. If at least one row is "TP", classify the run as "TP".
-            2. Otherwise, if at least one row is "FP", classify the run as "FP".
-            3. Otherwise, retain the Classification of the run.
-        Capture fraction:
-            Percentage of rows within the run classified as either "TP" or "TN":
-                Capture fraction = n / nRows * 100
-            where:
-                n = number of rows classified as TP or TN
-                nRows = total number of rows in the run
-
-        Parameters
-        ----------
-        classified (pandas.DataFrame) : DataFrame containing paired controlled-release and detection data.
-        cr_emissionrate (str) : Column name containing the controlled release emission rate.
-        tc_localization (str) : Column name containing the localization/equipment group.
-        factor (float) : Conversion factor from seconds to the time basis of the emission-rate data.
-        freq (str) : Frequency of analysis, e.g. "1min", "30s", "5min".
-
-        Returns (pandas.DataFrame) : One row per consecutive controlled-release/localization run, including
-                                    Classification and Capture fraction.
-    """
-
-    # Convert frequency to seconds
-    freq_duration = pd.Timedelta(freq).total_seconds()
-
-    # Work on a copy to avoid modifying the original dataframe
-    crdf = classified.copy()
-    crdf[tc_localization] = crdf[tc_localization].fillna(0)
-    crdf[cr_emissionrate] = crdf[cr_emissionrate].round(5)
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 1. Define consecutive runs
-    # ------------------------------------------------------------------------------------------------------------------
-
-    # Classification is deliberately excluded.
-    # A change in either emission rate or localization starts a new run.
-    group_columns = [cr_emissionrate, tc_localization]
-    crdf["shift"] = (crdf[group_columns].ne(crdf[group_columns].shift()).any(axis=1).cumsum())
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 2. Calculate total emission for each time step
-    # ------------------------------------------------------------------------------------------------------------------
-    crdf["Total"] = (crdf[cr_emissionrate] * freq_duration * factor)
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 3. Determine Classification for each run
-    # ------------------------------------------------------------------------------------------------------------------
-    def classify_run(series):
-        """
-            Assign a single Classification to an aggregated run.
-            Priority: TP > FP > existing classification
-        """
-
-        values = series.dropna()
-        if (values == "TP").any():
-            return "TP"
-        if (values == "FP").any():
-            return "FP"
-        if len(values) > 0:
-            return values.iloc[0]
-        return None
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 4. Calculate capture fraction
-    # ------------------------------------------------------------------------------------------------------------------
-    def capture_fraction(series):
-        # Total number of rows in the run
-        nRows = len(series)
-
-        # Number of TP and TN rows
-        nTP = (series == "TP").sum()
-        nTN = (series == "TN").sum()
-
-        # Capture fraction (%)
-        return ((nTP + nTN) / nRows) * 100
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 5. Aggregate consecutive runs
-    # ------------------------------------------------------------------------------------------------------------------
-    runs = (crdf.groupby("shift", sort=False).agg(Total=("Total", "sum"),
-                                                  Count=("Total", "size"),
-                                                  Classification=("Classification", classify_run),
-                                                  Capture_fraction=("Classification", capture_fraction),
-                                                  ControlledReleaseRate=(cr_emissionrate, "first"),
-                                                  Localization=(tc_localization, "first")).reset_index(drop=True))
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 6. Calculate emission rate for each run
-    # ------------------------------------------------------------------------------------------------------------------
-    runs["EmissionRate"] = (runs["Total"] / (runs["Count"] * freq_duration * factor))
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 7. Remove intermediate columns
-    # ------------------------------------------------------------------------------------------------------------------
-    runs.drop(columns=["Count", "Total", "ControlledReleaseRate"], inplace=True)
-
-    # ------------------------------------------------------------------------------------------------------------------
-    # 8. Restore original column names
-    # ------------------------------------------------------------------------------------------------------------------
-    runs.rename(columns={"EmissionRate": cr_emissionrate, "Localization": tc_localization,
-                         "Capture_fraction": "Capture fraction"}, inplace=True)
-
-    return runs
 
 def validate_spatial_inputs(controlledReleaseDF, detectionReportDF, tc_PolygonCoord, tc_localization,
                             dr_PolygonCoord, dr_localization):
@@ -3041,6 +2919,7 @@ def DataPairing(analyStarttime, analyEndtime, controlledReleaseDF, detectionRepo
     except Exception as e:
         print(f"Could not pair controlled release with detection report due to the exception: {e}")
         raise
+
     try:
         start_time = time.time()
         ClassifiedDF_s, CRDF_s, DRDF_s = compareSummarizedData(CRDF_sd, DRDF_sd, tc_Detected="tc_Detection", dr_Detected="dr_Detection",
