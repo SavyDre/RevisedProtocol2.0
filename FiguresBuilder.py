@@ -12,12 +12,11 @@ import statistics
 from warnings import warn
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc
-from sklearn.linear_model import LinearRegression
 import statsmodels.api as sm
 from matplotlib.font_manager import FontProperties
 from scipy.stats import norm
-from sklearn.linear_model import LogisticRegression
 from sklearn.linear_model import LinearRegression
+from sklearn.exceptions import ConvergenceWarning
 from scipy.stats import chi2
 from scipy.stats import gaussian_kde
 from Classification import DataPairing
@@ -1675,14 +1674,14 @@ def scatter(df, xCategory="ControlledReleaseRate", yCategory="Capture fraction",
 
     return fig, ax
 
-
 def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90, Nbootstrap=1000, fontsize=7,
                        xCategory='tc_EPBFE', yCategory='Classification', xlabel='Whole gas emission rate',
-                       ThresholdRateAboveBaseline=None, xunits='slpm', figsize=None, fig=None, axes=None,
-                       ScaleFactor=1, ylabel="Probability of Detection (POD)", borderpad=0.4, eps=1e-6,
-                       xScale="linear", yScale="linear", xmax=None, digits=1, xmin=None, mColors='b',
-                       bColors='#B0C4DE', loc='upper left', baseline=0, dpi=400, ci=0.95, n_curve_points=1000,
-                       bootstrap_alpha=0.10, random_state=None):
+                       xunits='slpm', figsize=None, fig=None, axes=None, ScaleFactor=1,
+                       ylabel="Probability of Detection (POD)", borderpad=0.4, eps=1e-6, xScale="linear",
+                       yScale="linear", xmax=None, digits=1, xmin=None, mColors='b', bColors='#B0C4DE',
+                       loc='upper left', baseline=0, dpi=400, ci=0.95, n_curve_points=1000, bootstrap_alpha=0.10,
+                       random_state=None, timeCategory='Time', block_duration='10min', expected_freq=None,
+                       gap_tolerance=1.5):
     """
         Perform logistic regression with bootstrap uncertainty estimation
         for a Probability of Detection (POD) curve.
@@ -1719,6 +1718,16 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
         bootstrap_alpha (float, default=0.10) : Transparency of individual bootstrap curves.
         random_state (int, optional) : Random seed for reproducible bootstrap sampling.
 
+        timeCategory (str): Timestamp column; repeated timestamps across locations are supported.
+        block_duration (str): Duration of synchronized moving blocks, e.g. '10min'.
+        expected_freq (str or None): Nominal observation spacing, e.g. '1min'; inferred if None.
+        gap_tolerance (float): A gap larger than this multiple of expected_freq
+            starts a new continuous monitoring segment.
+
+        Important: This bootstrap assumes temporal dependence is sufficiently
+        local and monitoring segments are suitable for within-segment resampling.
+        Check sensitivity to block_duration. It does not prove independence.
+
         Returns
             fig : matplotlib.figure.Figure
                   Generated figure.
@@ -1729,7 +1738,6 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     # ------------------------------------------------------------------------------------------------------------------
     # 1. Figure / axes
     # ------------------------------------------------------------------------------------------------------------------
-
     plt.rcParams.update({'font.size': fontsize})
 
     if fig is None:
@@ -1743,8 +1751,15 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     # ------------------------------------------------------------------------------------------------------------------
     # 2. Prepare data
     # ------------------------------------------------------------------------------------------------------------------
-
     # Only TP and FN observations are used for POD modeling
+    if timeCategory not in Df.columns:
+        raise KeyError(f"Timestamp column {timeCategory!r} not found")
+    if not (0 < desiredLDLFraction < 1) or not (0 < ci < 1):
+        raise ValueError("desiredLDLFraction and ci must be between 0 and 1")
+    if Nbootstrap < 1:
+        raise ValueError("Nbootstrap must be at least 1")
+    if gap_tolerance <= 1:
+        raise ValueError("gap_tolerance must exceed 1")
     CRDF = Df.loc[Df[yCategory].isin(['TP', 'FN'])].copy()
     CRDF.reset_index(drop=True, inplace=True)
 
@@ -1752,24 +1767,48 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     CRDF = CRDF.loc[:, ~CRDF.columns.duplicated()]
 
     # Keep only required columns
-    logisticDf = CRDF[[xCategory, yCategory]].copy()
+    logisticDf = CRDF[[xCategory, yCategory, timeCategory]].copy()
 
-    # TP = detected = 1
-    # FN = not detected = 0
+    # TP = detected = 1; FN = not detected = 0
     logisticDf['Detection'] = (logisticDf[yCategory].eq('TP').astype(int))
 
     # Make sure predictor is numeric
     logisticDf[xCategory] = pd.to_numeric(logisticDf[xCategory], errors='coerce')
 
     # Remove rows with invalid predictor values
-    logisticDf.dropna(subset=[xCategory, 'Detection'], inplace=True)
+    logisticDf[timeCategory] = pd.to_datetime(logisticDf[timeCategory], errors='coerce')
+    logisticDf.dropna(subset=[xCategory, 'Detection', timeCategory], inplace=True)
 
     # Apply baseline correction and scaling
     logisticDf[xCategory] = (logisticDf[xCategory] - baseline) * ScaleFactor
 
     # Logistic model uses ln(x), so x must be positive.
     logisticDf = logisticDf.loc[logisticDf[xCategory] > 0].copy()
+    logisticDf.sort_values(timeCategory, kind='stable', inplace=True)
     logisticDf.reset_index(drop=True, inplace=True)
+
+    # All locations at one timestamp form one inseparable sampling unit.
+    unique_times = pd.DatetimeIndex(logisticDf[timeCategory].drop_duplicates())
+    if len(unique_times) < 3:
+        raise ValueError("At least three distinct timestamps are required for block bootstrap")
+    positive_diffs = np.diff(unique_times.asi8)
+    if expected_freq is None:
+        spacing_ns = int(np.median(positive_diffs))
+    else:
+        spacing_ns = int(pd.Timedelta(expected_freq).value)
+    block_ns = int(pd.Timedelta(block_duration).value)
+    if spacing_ns <= 0 or block_ns <= 0:
+        raise ValueError("expected_freq and block_duration must be positive")
+    block_slots = max(1, int(np.ceil(block_ns / spacing_ns)))
+    if block_slots < 2:
+        raise ValueError("block_duration must span at least two time steps")
+
+    # Do not create a moving block across a gap in observed timestamps.
+    split_points = np.flatnonzero(positive_diffs > gap_tolerance * spacing_ns) + 1
+    time_segments = np.split(np.arange(len(unique_times)), split_points)
+    # For each timestamp, collect all row positions across simultaneous locations.
+    time_codes = pd.Categorical(logisticDf[timeCategory], categories=unique_times, ordered=True).codes
+    rows_by_time = [np.flatnonzero(time_codes == j) for j in range(len(unique_times))]
 
     # Need both TP and FN for logistic regression
     if logisticDf['Detection'].nunique() < 2:
@@ -1795,13 +1834,19 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     param = [modelIntercept, modelCoef]
 
     # Main DL estimate
-    ldl = invlogisticRegression(p=desiredLDLFraction, B=param)
+    def detection_limit(intercept, slope):
+        # Only positive slopes yield the usual increasing POD curve.
+        if slope <= 0 or not np.isfinite(slope):
+            return np.nan
+        logit_p = np.log(desiredLDLFraction / (1 - desiredLDLFraction))
+        log_x = (logit_p - intercept) / slope
+        return float(np.exp(log_x)) if log_x < np.log(np.finfo(float).max) else np.nan
+    ldl = detection_limit(modelIntercept, modelCoef)
 
     # ------------------------------------------------------------------------------------------------------------------
     # 4. Prediction grid
     # ------------------------------------------------------------------------------------------------------------------
-    # Use a fixed number of plotting points.
-    # Do NOT use Nbootstrap as the number of x-values.
+    # Use a fixed number of plotting points. Do NOT use Nbootstrap as the number of x-values.
     plot_min = minFlowRate
     plot_max = maxFlowRate
 
@@ -1813,7 +1858,6 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
 
     if xScale == "log":
         xMain = np.logspace(np.log10(max(plot_min, eps))-2, np.log10(plot_max)+2, n_curve_points)
-
     else:
         xMain = np.linspace(plot_min, plot_max, n_curve_points)
 
@@ -1824,63 +1868,84 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     # 5. Bootstrap containers
     # ------------------------------------------------------------------------------------------------------------------
     rng = np.random.default_rng(random_state)
-    n_obs = len(logisticDf)
-
-    # Each COLUMN corresponds to one bootstrap model
     Ymc = np.full((len(xMain), Nbootstrap), np.nan, dtype=float)
-
-    # Bootstrap DL values
     LDLmc = np.full(Nbootstrap, np.nan, dtype=float)
-
-    # Row 0 = intercept
-    # Row 1 = coefficient
     Bmc = np.full((2, Nbootstrap), np.nan, dtype=float)
 
     # ------------------------------------------------------------------------------------------------------------------
-    # 6. Bootstrap logistic regressions
+    # 6. Synchronized moving-block bootstrap
     # ------------------------------------------------------------------------------------------------------------------
+    # Within each uninterrupted monitoring segment, sample consecutive windows of timestamps with replacement.
+    # A selected timestamp brings ALL rows (all simultaneous release locations) with it. No blocks cross time gaps.
     successful_bootstraps = 0
+    single_class = 0
+    non_converged = 0
+    fitting_errors = 0
+    invalid_dl90 = 0
+
     for i in range(Nbootstrap):
-        # Sample WITH replacement from indices 0 ... n_obs-1
-        bootstrap_idx = rng.integers(low=0, high=n_obs, size=n_obs)
-        bootstrapDf = logisticDf.iloc[bootstrap_idx]
-        ybot = bootstrapDf['Detection'].to_numpy(dtype=int)
+        selected_times = []
 
-        # Skip samples that contain only TP or only FN
+        for segment in time_segments:
+            n_slots = len(segment)
+            length = min(block_slots, n_slots)
+            n_starts = n_slots - length + 1
+            n_blocks = int(np.ceil(n_slots / length))
+
+            starts = rng.integers(0, n_starts, size=n_blocks)
+            sampled = np.concatenate([segment[s:s + length] for s in starts])[:n_slots]
+            selected_times.extend(sampled.tolist())
+
+        bootstrap_idx = np.concatenate([rows_by_time[t] for t in selected_times])
+        ybot = Y[bootstrap_idx]
+
         if np.unique(ybot).size < 2:
+            single_class += 1
             continue
-
-        xbot_values = bootstrapDf[xCategory].to_numpy(dtype=float)
-        xbot = np.log(np.maximum(xbot_values, eps)).reshape(-1, 1)
+        xbot = X[bootstrap_idx]
 
         try:
-            botmodel = LogisticRegression(solver='lbfgs')
-            botmodel.fit(xbot, ybot)
-            botCoef = botmodel.coef_[0, 0]
-            botIntercept = botmodel.intercept_[0]
-            botB = [botIntercept, botCoef]
-            # Bootstrap DL
-            boot_ldl = invlogisticRegression(p=desiredLDLFraction, B=botB)
-            # Keep only finite estimates
-            if np.isfinite(boot_ldl):
-                LDLmc[i] = boot_ldl
-            Bmc[0, i] = botIntercept
-            Bmc[1, i] = botCoef
+            botmodel = LogisticRegression(solver="lbfgs", max_iter=1000)
+            # Treat convergence warnings as fitting failures
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ConvergenceWarning)
+                botmodel.fit(xbot, ybot)
+            botCoef = float(botmodel.coef_[0, 0])
+            botIntercept = float(botmodel.intercept_[0])
+            dl90 = detection_limit(botIntercept, botCoef)
 
-            # IMPORTANT:
-            # one entire logistic curve is stored in COLUMN i
+            if not np.isfinite(dl90):
+                invalid_dl90 += 1
+                continue
+
+            LDLmc[i] = dl90
+            Bmc[:, i] = [botIntercept, botCoef]
             Ymc[:, i] = botmodel.predict_proba(xMain_log)[:, 1]
             successful_bootstraps += 1
 
-        except Exception:
+        except ConvergenceWarning:
+            non_converged += 1
             continue
+        except (ValueError, FloatingPointError, OverflowError):
+            fitting_errors += 1
+            continue
+
+    print(f"Bootstrap: {successful_bootstraps}/{Nbootstrap} valid | "
+          f"Non-converged: {non_converged} | "
+          f"Non-estimable DL90: {invalid_dl90} | "
+          f"Other failures: {single_class + fitting_errors}")
+
+    if successful_bootstraps < max(20, int(0.5 * Nbootstrap)):
+        warnings.warn(f"Only {successful_bootstraps}/{Nbootstrap} bootstrap fits succeeded; confidence intervals may be unstable.", RuntimeWarning)
+    if len(unique_times) < 5 * block_slots:
+        warnings.warn("Fewer than approximately five block lengths in the full timeline; bootstrap uncertainty may be unreliable.", RuntimeWarning)
 
     # ------------------------------------------------------------------------------------------------------------------
     # 7. Confidence interval for DL
     # ------------------------------------------------------------------------------------------------------------------
     valid_ldl = LDLmc[np.isfinite(LDLmc)]
     alpha = 1 - ci
-    if len(valid_ldl) > 0:
+    if len(valid_ldl) >= 20:
         LowerCL = np.nanpercentile(valid_ldl, 100 * alpha / 2)
         UpperCL = np.nanpercentile(valid_ldl, 100 * (1 - alpha / 2))
     else:
@@ -1893,10 +1958,10 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     denominator = ('1 + e^{(%s%s*\\ln x)}'% (signed_fmt(-param[0]), signed_fmt(-param[1])))
     equation = r'$\frac{1}{%s}$' % denominator
     if (np.isfinite(ldl) and ldl >= minFlowRate and ldl <= maxFlowRate):
-        dl = latex_float(round(ldl, digits))
+        dl = f"{ldl:.{digits}f}"
         if (np.isfinite(LowerCL) and np.isfinite(UpperCL)):
-            lowLDL = latex_float(round(LowerCL, digits))
-            upLDL = latex_float(round(UpperCL, digits))
+            lowLDL = f"{LowerCL:.{digits}f}"
+            upLDL = f"{UpperCL:.{digits}f}"
             lab = (f'{dl} 'f'[{lowLDL}, {upLDL}]')
         else:
             lab = f'{dl}'
@@ -1907,8 +1972,8 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
     # ------------------------------------------------------------------------------------------------------------------
     # 9. Plot observations
     # ------------------------------------------------------------------------------------------------------------------
-    ax.scatter(logisticDf[xCategory], logisticDf['Detection'], label='TP & FN', s=5, facecolors='none', edgecolors='k',
-               zorder=3)
+    ax.scatter(logisticDf[xCategory], logisticDf['Detection'], label='TP & FN', s=5, facecolors='none',
+               edgecolors='k', zorder=3)
 
     # ------------------------------------------------------------------------------------------------------------------
     # 10. Plot bootstrap curves
@@ -1936,8 +2001,6 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
         # Vertical DL line
         ax.plot([ldl, ldl], [0, desiredLDLFraction], ls=':', lw=1.0, c='k', marker='None', zorder=4, label=label)
 
-    # if not pd.isna(ThresholdRateAboveBaseline):
-    #     ax.axvline(x=ThresholdRateAboveBaseline * ScaleFactor, color='red', linestyle='--', linewidth=1.0, label="Detection Threshold")
     # ------------------------------------------------------------------------------------------------------------------
     # 13. Axes
     # ------------------------------------------------------------------------------------------------------------------
@@ -1973,7 +2036,6 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
             for exponent in range(a_min, a_max + 1):
                 ax.axvline(x=10 ** exponent, c='k', linestyle='--', linewidth=0.03, zorder=0)
 
-
     # ------------------------------------------------------------------------------------------------------------------
     # 15. Labels
     # ------------------------------------------------------------------------------------------------------------------
@@ -2004,6 +2066,333 @@ def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90
 
     return fig, ax
 
+# def LOGISTICREGRESSION(Df, filePath=None, fileName=None, desiredLDLFraction=0.90, Nbootstrap=1000, fontsize=7,
+#                        xCategory='tc_EPBFE', yCategory='Classification', xlabel='Whole gas emission rate',
+#                        ThresholdRateAboveBaseline=None, xunits='slpm', figsize=None, fig=None, axes=None,
+#                        ScaleFactor=1, ylabel="Probability of Detection (POD)", borderpad=0.4, eps=1e-6,
+#                        xScale="linear", yScale="linear", xmax=None, digits=1, xmin=None, mColors='b',
+#                        bColors='#B0C4DE', loc='upper left', baseline=0, dpi=400, ci=0.95, n_curve_points=1000,
+#                        bootstrap_alpha=0.10, random_state=None):
+#     """
+#         Perform logistic regression with bootstrap uncertainty estimation
+#         for a Probability of Detection (POD) curve.
+#
+#         Parameters
+#         ----------
+#         Df (pandas.DataFrame) : Input dataframe containing the predictor and classification columns.
+#         filePath (str, optional) : Directory in which to save the plot.
+#         fileName (str, optional) : Filename for the saved plot.
+#         desiredLDLFraction (float, default=0.90) : Desired POD level for determination of the detection limit.
+#         Nbootstrap (int, default=1000) : Number of bootstrap resamples.
+#         fontsize (int, default=7) : Plot font size.
+#         xCategory (str) : Name of the independent-variable column.
+#         yCategory (str) : Name of the classification column.
+#         xlabel (str) : X-axis label.
+#         xunits (str) : X-axis units.
+#         figsize (tuple, optional) : Figure size.
+#         fig, axes (matplotlib objects, optional) : Existing figure and axes.
+#         ScaleFactor (float, default=1) : Scaling factor applied to xCategory.
+#         ylabel (str) : Y-axis label.
+#         borderpad (float) : Legend border padding.
+#         eps (float) : Small positive value used to avoid log(0).
+#         xScale (str) : X-axis scale, e.g. "linear" or "log".
+#         yScale (str) : Y-axis scale.
+#         xmax, xmin (float, optional) : X-axis limits.
+#         digits (int) : Number of decimal places used when displaying DL values.
+#         mColors: Color for the main logistic regression curve.
+#         bColors: Color for bootstrap curves.
+#         loc (str) : Legend location.
+#         baseline (float) : Baseline value subtracted from xCategory.
+#         dpi (int) : Saved figure resolution.
+#         ci (float, default=0.95) : Bootstrap confidence level.
+#         n_curve_points (int, default=1000) : Number of points used to evaluate each fitted POD curve.
+#         bootstrap_alpha (float, default=0.10) : Transparency of individual bootstrap curves.
+#         random_state (int, optional) : Random seed for reproducible bootstrap sampling.
+#
+#         Returns
+#             fig : matplotlib.figure.Figure
+#                   Generated figure.
+#             ax : matplotlib.axes.Axes
+#                  Generated axes.
+#     """
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 1. Figure / axes
+#     # ------------------------------------------------------------------------------------------------------------------
+#
+#     plt.rcParams.update({'font.size': fontsize})
+#
+#     if fig is None:
+#         if figsize:
+#             fig, ax = plt.subplots(figsize=figsize)
+#         else:
+#             fig, ax = plt.subplots()
+#     else:
+#         ax = axes if axes is not None else plt.gca()
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 2. Prepare data
+#     # ------------------------------------------------------------------------------------------------------------------
+#
+#     # Only TP and FN observations are used for POD modeling
+#     CRDF = Df.loc[Df[yCategory].isin(['TP', 'FN'])].copy()
+#     CRDF.reset_index(drop=True, inplace=True)
+#
+#     # Prevent duplicated column names from causing problems
+#     CRDF = CRDF.loc[:, ~CRDF.columns.duplicated()]
+#
+#     # Keep only required columns
+#     logisticDf = CRDF[[xCategory, yCategory]].copy()
+#
+#     # TP = detected = 1
+#     # FN = not detected = 0
+#     logisticDf['Detection'] = (logisticDf[yCategory].eq('TP').astype(int))
+#
+#     # Make sure predictor is numeric
+#     logisticDf[xCategory] = pd.to_numeric(logisticDf[xCategory], errors='coerce')
+#
+#     # Remove rows with invalid predictor values
+#     logisticDf.dropna(subset=[xCategory, 'Detection'], inplace=True)
+#
+#     # Apply baseline correction and scaling
+#     logisticDf[xCategory] = (logisticDf[xCategory] - baseline) * ScaleFactor
+#
+#     # Logistic model uses ln(x), so x must be positive.
+#     logisticDf = logisticDf.loc[logisticDf[xCategory] > 0].copy()
+#     logisticDf.reset_index(drop=True, inplace=True)
+#
+#     # Need both TP and FN for logistic regression
+#     if logisticDf['Detection'].nunique() < 2:
+#         raise ValueError("Logistic regression requires at least one TP and at least one FN observation.")
+#
+#     if len(logisticDf) < 2:
+#         raise ValueError("Insufficient observations for logistic regression.")
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 3. Main logistic regression model
+#     # ------------------------------------------------------------------------------------------------------------------
+#     xDatafield = logisticDf[xCategory].to_numpy(dtype=float)
+#     Y = logisticDf['Detection'].to_numpy(dtype=int)
+#     minFlowRate = np.min(xDatafield)
+#     maxFlowRate = np.max(xDatafield)
+#
+#     # Model predictor = ln(x)
+#     X = np.log(np.maximum(xDatafield, eps)).reshape(-1, 1)
+#     logReg = LogisticRegression(solver='lbfgs')
+#     logReg.fit(X, Y)
+#     modelCoef = logReg.coef_[0, 0]
+#     modelIntercept = logReg.intercept_[0]
+#     param = [modelIntercept, modelCoef]
+#
+#     # Main DL estimate
+#     ldl = invlogisticRegression(p=desiredLDLFraction, B=param)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 4. Prediction grid
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # Use a fixed number of plotting points.
+#     # Do NOT use Nbootstrap as the number of x-values.
+#     plot_min = minFlowRate
+#     plot_max = maxFlowRate
+#
+#     # If user supplied valid limits, use them
+#     if xmin is not None and xmin > 0:
+#         plot_min = xmin
+#     if xmax is not None and xmax > plot_min:
+#         plot_max = xmax
+#
+#     if xScale == "log":
+#         xMain = np.logspace(np.log10(max(plot_min, eps))-2, np.log10(plot_max)+2, n_curve_points)
+#
+#     else:
+#         xMain = np.linspace(plot_min, plot_max, n_curve_points)
+#
+#     xMain_log = np.log(np.maximum(xMain, eps)).reshape(-1, 1)
+#     yMain = logReg.predict_proba(xMain_log)[:, 1]
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 5. Bootstrap containers
+#     # ------------------------------------------------------------------------------------------------------------------
+#     rng = np.random.default_rng(random_state)
+#     n_obs = len(logisticDf)
+#
+#     # Each COLUMN corresponds to one bootstrap model
+#     Ymc = np.full((len(xMain), Nbootstrap), np.nan, dtype=float)
+#
+#     # Bootstrap DL values
+#     LDLmc = np.full(Nbootstrap, np.nan, dtype=float)
+#
+#     # Row 0 = intercept
+#     # Row 1 = coefficient
+#     Bmc = np.full((2, Nbootstrap), np.nan, dtype=float)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 6. Bootstrap logistic regressions
+#     # ------------------------------------------------------------------------------------------------------------------
+#     successful_bootstraps = 0
+#     for i in range(Nbootstrap):
+#         # Sample WITH replacement from indices 0 ... n_obs-1
+#         bootstrap_idx = rng.integers(low=0, high=n_obs, size=n_obs)
+#         bootstrapDf = logisticDf.iloc[bootstrap_idx]
+#         ybot = bootstrapDf['Detection'].to_numpy(dtype=int)
+#
+#         # Skip samples that contain only TP or only FN
+#         if np.unique(ybot).size < 2:
+#             continue
+#
+#         xbot_values = bootstrapDf[xCategory].to_numpy(dtype=float)
+#         xbot = np.log(np.maximum(xbot_values, eps)).reshape(-1, 1)
+#
+#         try:
+#             botmodel = LogisticRegression(solver='lbfgs')
+#             botmodel.fit(xbot, ybot)
+#             botCoef = botmodel.coef_[0, 0]
+#             botIntercept = botmodel.intercept_[0]
+#             botB = [botIntercept, botCoef]
+#             # Bootstrap DL
+#             boot_ldl = invlogisticRegression(p=desiredLDLFraction, B=botB)
+#             # Keep only finite estimates
+#             if np.isfinite(boot_ldl):
+#                 LDLmc[i] = boot_ldl
+#             Bmc[0, i] = botIntercept
+#             Bmc[1, i] = botCoef
+#
+#             # IMPORTANT:
+#             # one entire logistic curve is stored in COLUMN i
+#             Ymc[:, i] = botmodel.predict_proba(xMain_log)[:, 1]
+#             successful_bootstraps += 1
+#
+#         except Exception:
+#             continue
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 7. Confidence interval for DL
+#     # ------------------------------------------------------------------------------------------------------------------
+#     valid_ldl = LDLmc[np.isfinite(LDLmc)]
+#     alpha = 1 - ci
+#     if len(valid_ldl) > 0:
+#         LowerCL = np.nanpercentile(valid_ldl, 100 * alpha / 2)
+#         UpperCL = np.nanpercentile(valid_ldl, 100 * (1 - alpha / 2))
+#     else:
+#         LowerCL = np.nan
+#         UpperCL = np.nan
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 8. Equation / legend label
+#     # ------------------------------------------------------------------------------------------------------------------
+#     denominator = ('1 + e^{(%s%s*\\ln x)}'% (signed_fmt(-param[0]), signed_fmt(-param[1])))
+#     equation = r'$\frac{1}{%s}$' % denominator
+#     if (np.isfinite(ldl) and ldl >= minFlowRate and ldl <= maxFlowRate):
+#         dl = latex_float(round(ldl, digits))
+#         if (np.isfinite(LowerCL) and np.isfinite(UpperCL)):
+#             lowLDL = latex_float(round(LowerCL, digits))
+#             upLDL = latex_float(round(UpperCL, digits))
+#             lab = (f'{dl} 'f'[{lowLDL}, {upLDL}]')
+#         else:
+#             lab = f'{dl}'
+#         label = (f'DL{int(desiredLDLFraction * 100)}: 'f'{lab}')
+#     else:
+#         label = (f'DL{int(desiredLDLFraction * 100)} ''beyond range')
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 9. Plot observations
+#     # ------------------------------------------------------------------------------------------------------------------
+#     ax.scatter(logisticDf[xCategory], logisticDf['Detection'], label='TP & FN', s=5, facecolors='none', edgecolors='k',
+#                zorder=3)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 10. Plot bootstrap curves
+#     # ------------------------------------------------------------------------------------------------------------------
+#     for i in range(Nbootstrap):
+#         # Ignore unsuccessful fits
+#         if np.isnan(Ymc[:, i]).all():
+#             continue
+#
+#         # plot COLUMN i, not ROW i
+#         ax.plot(xMain, Ymc[:, i], ls='solid', lw=0.5, c=bColors, marker='None', alpha=bootstrap_alpha, zorder=1)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 11. Plot main logistic regression curve
+#     # ------------------------------------------------------------------------------------------------------------------
+#     ax.plot(xMain, yMain, ls='solid', lw=1, c=mColors, marker='None', label=equation, zorder=4)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 12. Plot desired detection threshold
+#     # ------------------------------------------------------------------------------------------------------------------
+#     if np.isfinite(ldl):
+#         # Horizontal DL probability line
+#         ax.plot([plot_min, ldl], [desiredLDLFraction, desiredLDLFraction], ls=':', lw=1.0, c='k', marker='None',
+#                 zorder=4)
+#         # Vertical DL line
+#         ax.plot([ldl, ldl], [0, desiredLDLFraction], ls=':', lw=1.0, c='k', marker='None', zorder=4, label=label)
+#
+#     # if not pd.isna(ThresholdRateAboveBaseline):
+#     #     ax.axvline(x=ThresholdRateAboveBaseline * ScaleFactor, color='red', linestyle='--', linewidth=1.0, label="Detection Threshold")
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 13. Axes
+#     # ------------------------------------------------------------------------------------------------------------------
+#     ax.set_xscale(xScale)
+#     ax.set_yscale(yScale)
+#     ax.set_ylim([-0.05, 1.05])
+#
+#     if xmin is not None and xmax is not None:
+#         ax.set_xlim([xmin, xmax])
+#
+#     elif xmin is not None:
+#         ax.set_xlim(left=xmin)
+#
+#     elif xmax is not None:
+#         ax.set_xlim(right=xmax)
+#
+#     else:
+#         ax.set_xlim([plot_min, plot_max])
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 14. Grid
+#     # ------------------------------------------------------------------------------------------------------------------
+#     ax.grid(axis='both', alpha=0.05)
+#
+#     # Optional logarithmic decade lines
+#     if xScale == "log":
+#         current_xlim = ax.get_xlim()
+#         positive_min = max(current_xlim[0], eps)
+#         positive_max = current_xlim[1]
+#         if positive_max > positive_min:
+#             a_min = int(np.ceil(np.log10(positive_min)))
+#             a_max = int(np.floor(np.log10(positive_max)))
+#             for exponent in range(a_min, a_max + 1):
+#                 ax.axvline(x=10 ** exponent, c='k', linestyle='--', linewidth=0.03, zorder=0)
+#
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 15. Labels
+#     # ------------------------------------------------------------------------------------------------------------------
+#     if ylabel:
+#         ax.set_ylabel(ylabel, fontsize=fontsize)
+#     if xlabel:
+#         ax.set_xlabel(f"{xlabel} ({xunits})", fontsize=fontsize)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 16. Legend
+#     # ------------------------------------------------------------------------------------------------------------------
+#     fontP = FontProperties()
+#     fontP.set_size(fontsize)
+#     leg = ax.legend(loc=loc, prop=fontP, borderpad=borderpad)
+#     leg.get_frame().set_linewidth(0.5)
+#
+#     # ------------------------------------------------------------------------------------------------------------------
+#     # 17. Save plot
+#     # ------------------------------------------------------------------------------------------------------------------
+#     if fileName:
+#         if filePath:
+#             path = os.path.join(filePath, fileName)
+#         else:
+#             path = os.path.join(os.getcwd(), fileName)
+#
+#         print(f"saving: {path}")
+#         fig.savefig(path, dpi=dpi, bbox_inches='tight')
+#
+#     return fig, ax
 
 def densityPlot(DF,xCategory, classification, fig=None, axes=None, fontsize=12, figsize=(6, 4), N=1000,
                 eps=1e-9, xScale="linear", xlimit=None, loc="upper right", fileName=None, filePath=None,
