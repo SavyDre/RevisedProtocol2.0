@@ -207,96 +207,349 @@ def evaluateRelativeErrors(quantDF, minTrueRate, cr_emission, dr_emission):
 
     return quantDF
 
-def identify_consecutive_runs(df, classification, RecievedTime=None):
+
+def identify_consecutive_runs(df, classification, RecievedTime=None, temporal_resolution=None):
     """
-        Identifies consecutive runs of values in the specified column of a DataFrame
-        and returns a new DataFrame with startTime, endTime, Classification, DetectTime, and ID.
+        Identify consecutive runs of identical classification values in a time-indexed DataFrame.
+        A new run is initiated when:
+            1. The classification value changes.
+            2. The current or preceding classification is missing.
+            3. Consecutive timestamps are separated by an interval
+               different from the specified temporal resolution.
 
-        Parameters:
-            - df (pd.DataFrame): Input DataFrame with datetime index and a column of binary or categorical values.
-            - classification (1 or 0): The name of the column containing the values to identify runs (1s and 0s).
-            - ReceivedTime: The datetime (UTC) at which an observation report was received by the Test Center
+        Parameters
+        ----------
+        df : pd.DataFrame - Input DataFrame with a DatetimeIndex.
+        classification : str - Name of the column containing binary or categorical classification values.
+        RecievedTime : str or None, optional - Name of the column containing Observation Report receipt timestamps.
+                       If specified, the earliest valid receipt timestamp within each run is returned.
+        temporal_resolution : str, pd.Timedelta or None, optional - Expected interval between consecutive analysis timestamps,
+                            e.g., '30s' or '1min'. If None, runs are identified based on classification changes and
+                            missing values without checking temporal gaps.
+        Returns
+        -------
+        pd.DataFrame - DataFrame containing:
+            startTime: Timestamp of the first sample in each run.
+            endTime: Timestamp of the last sample in each run.
+            Classification: Classification value associated with the run.
+            RecievedTime: Earliest valid receipt timestamp within the run, if a receipt timestamp column is specified.
+            ID: Unique sequential identifier assigned to each run.
 
-        Returns:
-        - pd.DataFrame: A DataFrame with columns:
-            - "startTime": The start time of the run.
-            - "endTime": The end time of the run.
-            - "Classification": The value of the run (from the column_name).
-            - "ReceivedTime": The minimum value of the ReceivedTime
-            - "ID": A unique incremental integer for each run.
+        Notes
+        -----
+        startTime and endTime represent the first and last included sample timestamps, rather than necessarily the
+        physical boundaries of the corresponding observation interval. The minimum receipt timestamp aggregated over an
+        entire detection run should not be used directly to calculate TTA where the run contains both TP and FP time steps.
     """
-    # Ensure the DataFrame is sorted by datetime index
-    df = df.sort_index()
 
-    # Ensure the index is a datetime index
+    # Validate the input datetime index.
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("DataFrame index must be a DatetimeIndex.")
-    # Add a group identifier for consecutive runs
-    df['shift'] = df[classification].ne(df[classification].shift()).cumsum()
-    # Reset the index to access it as a column for aggregation
-    df.index.name = 'Time' # Ensures the new column created is called "Time"
+
+    if df.index.hasnans:
+        raise ValueError("DataFrame index must not contain missing timestamps.")
+
+    if not df.index.is_unique:
+        raise ValueError("DataFrame index must contain unique timestamps.")
+
+    if classification not in df.columns:
+        raise KeyError(f"Classification column '{classification}' not found.")
+
+    # Sort chronologically and avoid modifying the input DataFrame.
+    df = df.sort_index().copy()
+
+    # Convert receipt timestamps to UTC, where applicable.
+    # Invalid or missing receipt timestamps are represented by NaT.
+    if RecievedTime is not None:
+        if RecievedTime not in df.columns:
+            raise KeyError(f"Receipt timestamp column '{RecievedTime}' not found.")
+        df[RecievedTime] = pd.to_datetime(df[RecievedTime], utc=True, errors="coerce")
+
+    # Identify changes in classification between successive rows.
+    new_run = (df[classification].ne(df[classification].shift()).fillna(True))
+
+    # Missing classifications interrupt consecutive runs. This prevents excluded or unavailable data from connecting
+    # otherwise separate detection periods.
+    new_run = (new_run | df[classification].isna() | df[classification].shift().isna())
+
+    # Identify temporal discontinuities, where an expected analysis temporal resolution has been specified.
+    if temporal_resolution is not None:
+        resolution = pd.to_timedelta(temporal_resolution)
+
+        if pd.isna(resolution) or resolution <= pd.Timedelta(0):
+            raise ValueError("temporal_resolution must be a positive time interval.")
+        time_difference = df.index.to_series().diff()
+
+        # A temporal gap initiates a new run, even when the classification remains unchanged.
+        new_run = (new_run | time_difference.ne(resolution))
+
+    # Assign a common group identifier to samples belonging# to the same consecutive run.
+    df["shift"] = new_run.cumsum()
+
+    # Convert the datetime index into a column for aggregation.
+    df.index.name = "Time"
     df = df.reset_index()
 
-    # Aggregate by the 'shift' column
-    if RecievedTime is not None:
-        result_df = df.groupby('shift').agg(startTime=('Time', 'first'),  # Start time of the run
-                                            endTime=('Time', 'last'),  # End time of the run
-                                            Classification=(classification, 'first'),  # Value of the run
-                                            RecievedTime=(RecievedTime, 'min') # Minimum/earliest received time
-                                            ).reset_index(drop=True)
-    else:
-        result_df = df.groupby('shift').agg(startTime=('Time', 'first'),  # Start time of the run
-                                            endTime=('Time', 'last'),  # End time of the run
-                                            Classification=(classification, 'first')  # Value of the run
-                                            ).reset_index(drop=True)
+    # Define the aggregation operations for each run.
+    aggregations = {"startTime": ("Time", "first"), "endTime": ("Time", "last"), "Classification": (classification, "first")}
 
-    # Assign unique IDs starting from 1
-    result_df['ID'] = result_df.index + 1
+    # Optionally retain the earliest receipt timestamp in each run.
+    if RecievedTime is not None:
+        aggregations["RecievedTime"] = ( RecievedTime, "min")
+
+    # Aggregate consecutive samples into individual runs.
+    result_df = (df.groupby("shift", sort=False).agg(**aggregations).reset_index(drop=True))
+
+    # Assign unique sequential identifiers starting from one.
+    result_df["ID"] = result_df.index + 1
 
     return result_df
 
 
-def timeDifference(DRDF, CRDF, RecievedTime, tc_Detection="tc_Detection", dr_Detection="dr_Detection", timebasis=60):
+def timeDifference(DRDF, CRDF, RecievedTime, tc_Detection="tc_Detection", dr_Detection="dr_Detection",
+                   timebasis=60, temporal_resolution="30s", sample_end_timestamps=True):
     """
-        Return (TTA, TTD) arrays, one minimum per matched controlled-release run.
+        Calculate Time to Alert (TTA) and Time to Detection (TTD) for successfully detected Test Centre detection periods.
+        A Test Centre detection period is defined as a continuous interval during which the Test Centre Controlled Release
+        data satisfy the specified detection threshold criteria.
 
-        Detection timestamps are sample-end timestamps, matching the classification
-        grid. An alert requires a valid receipt time; detection time does not. UTC
-        conversion preserves instants. Process each CR run independently to avoid a
-        potentially huge CR-by-DR matrix. The historical RecievedTime spelling is
-        retained for compatibility.
+        - Time to Detection (TTD): TTD is calculated as the elapsed time between the onset of a Test Centre detection
+        period and the first corresponding qualifying solution detection.
+        -----------------------
+            A TTD of zero is assigned when a qualifying solution detection is already present at the onset of the Test
+            Centre detection period.
+
+        - Time to Alert (TTA): TTA is calculated as the elapsed time between the onset of a successfully detected Test
+        Centre detection period and the earliest valid receipt timestamp associated with a corresponding TP time step.
+        -------------------
+            Receipt timestamps preceding the onset of the Test Centre detection period are excluded to prevent negative
+            TTA values.
+
+        Parameters
+        ----------
+        - DRDF (pd.DataFrame) : Time-resolved solution Observation Report data containing detection classifications and,
+          where available, receipt timestamps.
+        - CRDF (pd.DataFrame) : Time-resolved Test Centre Controlled Release data containing detection classifications.
+        - RecievedTime (str or None) : Name of the column containing the timestamps at which Observation Reports were
+          received by the Test Centre.
+            If None, or if the specified column is unavailable, only TTD is calculated.
+        - tc_Detection (str, optional) : Name of the Test Centre binary detection column.
+        - dr_Detection (str, optional) : Name of the solution binary detection column.
+        - timebasis (float, optional) : Number of seconds per output time unit.
+            Examples:
+                    1 : seconds
+                    60 : minutes
+                    3600 : hours
+            Default is 60, corresponding to minutes.
+
+        - temporal_resolution (str or pd.Timedelta, optional) : Temporal resolution of the detection classification
+          analysis grid, e.g., '30s' or '1min'.
+            Default is '30s'.
+
+        - sample_end_timestamps (bool, optional) : Indicates whether the datetime indices represent the ends of the
+          corresponding analysis time steps. If True, the beginning of the first qualifying time step is obtained by
+          subtracting one analysis time step from its timestamp. If False, timestamps are assumed to represent the
+          beginnings of the analysis time steps. Default is True.
+
+        Returns
+        -------
+        TTA : np.ndarray
+            Non-negative Time to Alert values for successfully
+            detected Test Centre detection periods with valid
+            corresponding receipt timestamps.
+
+        TTD : np.ndarray
+            Non-negative Time to Detection values for successfully
+            detected Test Centre detection periods.
+
+        Notes
+        -----
+        1. The function should be applied independently within
+           each Analysis Spatial Extent (ASE).
+
+        2. Test Centre data and solution Observation Reports must
+           already be temporally aligned and spatially aggregated
+           at the specified analysis resolution.
+
+        3. Detection classifications must represent binary
+           threshold outcomes, with 1 indicating True and
+           0 indicating False. Missing or excluded classifications
+           are represented by NaN.
+
+        4. Undetected Test Centre detection periods do not
+           contribute numerical TTD or TTA values.
+
+        5. Missing or invalid receipt timestamps affect TTA
+           calculations but do not affect TTD calculations.
+
+        6. Receipt timestamps must remain associated with the
+           Observation Reports contributing to the corresponding
+           TP time steps.
+
+        7. The returned TTA and TTD arrays may have different
+           lengths and should not be assumed to contain paired
+           measurements.
     """
-    if timebasis <= 0:
-        raise ValueError('timebasis must be positive.')
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 1. Validate analysis parameters.
+    # ------------------------------------------------------------------------------------------------------------
+
+    if not np.isfinite(timebasis) or timebasis <= 0:
+        raise ValueError("timebasis must be finite and positive.")
+    resolution = pd.to_timedelta(temporal_resolution)
+
+    if pd.isna(resolution) or resolution <= pd.Timedelta(0):
+        raise ValueError("temporal_resolution must be a positive time interval.")
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 2. Prepare Test Centre and solution datasets.
+    # ------------------------------------------------------------------------------------------------------------
+    # Copy input DataFrames to avoid modifying the original data.
     cr = CRDF.copy()
     dr = DRDF.copy()
+
+    # Convert timestamps to UTC and sort chronologically.
+    # Timezone-aware timestamps retain their original instants.
+    # Timezone-naive timestamps are assumed to already be UTC.
     cr.index = pd.to_datetime(cr.index, utc=True)
     dr.index = pd.to_datetime(dr.index, utc=True)
+    cr = cr.sort_index()
+    dr = dr.sort_index()
 
-    # Exclusions must break detection runs; otherwise maintenance/offline data
-    # can contribute alerts even though classification deliberately excludes it.
-    for frame, flag, detection in ((cr, 'tc_Classification', tc_Detection), (dr, 'dr_Classification', dr_Detection)):
-        if flag in frame:
-            excluded = frame[flag].astype(str).str.contains('Data Excluded', regex=False)
-            frame[detection] = frame[detection].astype(float).mask(excluded)
-    has_receipt = RecievedTime is not None and RecievedTime in dr
+    # Validate timestamps and detection columns.
+    for frame, detection, dataset in ((cr, tc_Detection, "Test Centre"), (dr, dr_Detection, "Solution")):
+        if frame.index.hasnans:
+            raise ValueError(f"{dataset} index contains missing timestamps.")
+
+        if not frame.index.is_unique:
+            raise ValueError(f"{dataset} index contains duplicate timestamps.")
+
+        if detection not in frame.columns:
+            raise KeyError(f"{dataset} detection column '{detection}' not found.")
+
+    # ----------------------------------------------------------------------------------------------------------
+    # 3. Account for excluded data.
+    # ----------------------------------------------------------------------------------------------------------
+    # Excluded observations must not contribute to detection periods or true-positive classifications.
+    for frame, flag, detection in ((cr, "tc_Classification", tc_Detection), (dr, "dr_Classification", dr_Detection)):
+        # Convert binary classifications to float to accommodate missing values introduced during exclusion.
+        frame[detection] = frame[detection].astype(float)
+        if flag in frame.columns:
+            excluded = (frame[flag].astype(str).str.contains("Data Excluded", regex=False, na=False))
+
+            # Mask excluded classifications rather than assigning False, because excluded data are not equivalent to
+            # valid negative detection outcomes.
+            frame[detection] = (frame[detection].mask(excluded))
+
+        # Ensure that retained detection classifications are binary.
+        valid_values = frame[detection].dropna()
+
+        if not valid_values.isin([0, 1]).all():
+            raise ValueError(f"Detection column '{detection}' must contain only binary values (0 or 1) or missing values.")
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # 4. Prepare Observation Report receipt timestamps.
+    # ------------------------------------------------------------------------------------------------------------------
+    has_receipt = (RecievedTime is not None and RecievedTime in dr.columns)
     if has_receipt:
-        dr[RecievedTime] = pd.to_datetime(dr[RecievedTime], utc=True, errors='coerce')
-    cr_runs = identify_consecutive_runs(cr, tc_Detection)
-    dr_runs = identify_consecutive_runs(dr, dr_Detection, RecievedTime if has_receipt else None)
-    cr_runs = cr_runs.loc[cr_runs['Classification'] > 0]
-    dr_runs = dr_runs.loc[dr_runs['Classification'] > 0]
-    TTA, TTD = [], []
+        # Invalid receipt timestamps are converted to NaT. These observations remain eligible for TTD evaluation.
+        dr[RecievedTime] = pd.to_datetime(dr[RecievedTime], utc=True, errors="coerce")
+
+    # -------------------------------------------------------------------------------------------------------------
+    # 5. Identify Test Centre detection periods.
+    # -------------------------------------------------------------------------------------------------------------
+    # Consecutive positive Test Centre classifications define detection periods. Missing classifications and temporal
+    # discontinuities interrupt these periods.
+
+    cr_runs = identify_consecutive_runs(cr, tc_Detection, temporal_resolution=resolution)
+    # Retain only periods satisfying the specified detection threshold criteria.
+    cr_runs = cr_runs.loc[cr_runs["Classification"] == 1]
+
+    # ----------------------------------------------------------------------------------------------------------------
+    # 6. Identify true-positive time steps.
+    # --------------------------------------------------------------------------------------------------------------
+    # Identify timestamps at which the Test Centre Controlled Release data satisfy the detection threshold criteria.
+    tc_positive_index = cr.index[cr[tc_Detection] == 1]
+
+    # Identify qualifying solution detections.
+    dr_positive = dr.loc[dr[dr_Detection] == 1]
+
+    # A time step is classified as TP when both the Test Centre and solution detection threshold outcomes are True.
+    # Restricting the analysis to these timestamps prevents FP detections, missing ground-truth data and excluded
+    # observations from contributing to TTD or TTA.
+    tp = dr_positive.loc[dr_positive.index.isin(tc_positive_index)]
+
+    # ----------------------------------------------------------------------------------------------------------------
+    # 7. Calculate TTD and TTA for each detection period.
+    # ----------------------------------------------------------------------------------------------------------------
+    TTA = []
+    TTD = []
+
     for run in cr_runs.itertuples(index=False):
-        matches = dr_runs.loc[dr_runs['startTime'].between(run.startTime, run.endTime)]
-        if matches.empty:
+        # Locate TP time steps within the current Test Centre detection period.
+        # searchsorted avoids repeatedly scanning the entire solution dataset for each detection period.
+        left = tp.index.searchsorted(run.startTime, side="left")
+        right = tp.index.searchsorted(run.endTime, side="right")
+        matched_tp = tp.iloc[left:right]
+
+        # If no corresponding TP time step exists, the Test Centre detection period was not successfully detected.
+        # Such periods have no numerical TTD or TTA.
+        if matched_tp.empty:
             continue
-        TTD.append((matches['startTime'].min() - run.startTime).total_seconds() / timebasis)
+
+        # --------------------------------------------------------------------------------------------------------
+        # 7a. Determine the reference onset.
+        # --------------------------------------------------------------------------------------------------------
+        # If timestamps represent sample ends, subtract one analysis time step to obtain the beginning of the
+        # first qualifying Test Centre time step.
+        if sample_end_timestamps:
+            reference_onset = (run.startTime - resolution)
+        else:
+            reference_onset = run.startTime
+
+        # ---------------------------------------------------------------------------------------------------------
+        # 7b. Calculate Time to Detection (TTD).
+        # ---------------------------------------------------------------------------------------------------------
+        # Identify the first TP time step within the Test Centre detection period.
+        first_detection = matched_tp.index[0]
+
+        # Convert the first TP timestamp to the beginning of its analysis time step, using the same timestamp convention
+        # applied to the Test Centre detection period.
+        if sample_end_timestamps:
+            first_detection = (first_detection - resolution)
+
+        # Calculate detection latency in the specified time units. If a qualifying solution detection is already present
+        # at the onset of the Test Centre detection period, the first TP time step coincides with the reference onset
+        # and TTD is therefore zero.
+        ttd = (first_detection - reference_onset).total_seconds() / timebasis
+        TTD.append(ttd)
+
+        # ----------------------------------------------------------------------------------------------------------
+        # 7c. Calculate Time to Alert (TTA).
+        # ----------------------------------------------------------------------------------------------------------
         if has_receipt:
-            receipt = matches['RecievedTime'].min()
-            if pd.notna(receipt):
-                TTA.append((receipt - run.startTime).total_seconds() / timebasis)
-    return np.asarray(TTA), np.asarray(TTD)
+            # Retain valid receipt timestamps associated specifically with corresponding TP time steps.
+            valid_receipts = (matched_tp[RecievedTime].dropna())
+
+            # Exclude receipt timestamps preceding the onset of the Test Centre detection period. Such timestamps would
+            # produce negative TTA values and are not considered valid alert latencies for the corresponding emission period.
+            valid_receipts = valid_receipts.loc[valid_receipts >= reference_onset]
+
+            # If no valid receipt timestamp remains, omit TTA for this period without affecting its TTD.
+            if not valid_receipts.empty:
+                # Identify the earliest valid receipt timestamp associated with a corresponding TP time step.
+                first_receipt = valid_receipts.min()
+
+                # Calculate alert latency in the specified time units.
+                tta = (first_receipt - reference_onset).total_seconds() / timebasis
+
+                TTA.append(tta)
+
+    # --------------------------------------------------------------------------------------------------------------
+    # 8. Return latency measurements as NumPy arrays.
+    # --------------------------------------------------------------------------------------------------------------
+    return (np.asarray(TTA, dtype=float), np.asarray(TTD, dtype=float))
 
 def concatenate_with_common_index(df1, df2):
     """
@@ -351,6 +604,12 @@ def OperationalFactorsAnalysis(CRDF, DRDF):
     CRDF['tc_Classification'] = CRDF['tc_Classification'].astype(str)
     DRDF['dr_Classification'] = DRDF['dr_Classification'].astype(str)
     # Calculate the operational fractions for the solution
+
+    # Exclude offline period
+    exclude_pattern = (r"'Offline Record: Data Excluded'|" r"'Maintenance Record: Data Excluded'")
+    CRDF = CRDF.loc[~CRDF["tc_Classification"].str.contains(exclude_pattern, na=False)]
+    DRDF = DRDF.loc[~DRDF["dr_Classification"].str.contains(exclude_pattern, na=False)]
+
     try:
         Total_TC_time = CRDF["time_diffs"].sum()
         # Filter valid center data when not under maintenance/offline  - data during test center online time
