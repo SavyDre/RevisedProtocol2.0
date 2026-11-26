@@ -5,13 +5,15 @@ import shutil
 import math
 import pandas as pd
 
-def writeOutputData(saveDir, datapath, classifiedDF, DetectionData, TestCenterData, paperDict):
-    """Write the four result tables and LaTeX values without changing callers data."""
+def writeOutputData(saveDir, datapath, PairedDF, DetectionData, TestCenterData, paperDict):
+    """
+        Write the four result tables and LaTeX values without changing callers data.
+    """
 
     ## Write data files
-    classifiedDF.to_csv(pathlib.PurePath(datapath, "ClassifiedData.csv"), index=False)
-    DetectionData.to_csv(pathlib.PurePath(datapath, "DetectionData.csv"), index=False)
-    TestCenterData.to_csv(pathlib.PurePath(datapath, "TestCenterData.csv"), index=False)
+    DetectionData.to_csv(pathlib.PurePath(datapath, "DetectionDataTimestep.csv"), index=False)
+    TestCenterData.to_csv(pathlib.PurePath(datapath, "TestCenterDataTimestep.csv"), index=False)
+    PairedDF.to_csv(pathlib.PurePath(datapath, "PairedData.csv"), index=False)
 
     # Writing paper dict variables to report
     try:
